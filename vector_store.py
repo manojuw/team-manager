@@ -190,6 +190,20 @@ class VectorStore:
             logger.error(f"Get data sources failed: {e}")
             return []
 
+    def update_data_source_config(self, source_id: str, config: dict):
+        config_json = json.dumps(config)
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE project_data_sources SET config = %s WHERE id = %s",
+                        (config_json, source_id),
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Update data source config failed: {e}")
+            raise
+
     def remove_data_source(self, source_id: str, project_id: str):
         try:
             with self._get_conn() as conn:

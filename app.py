@@ -17,10 +17,7 @@ st.set_page_config(
 
 def init_session_state():
     defaults = {
-        "teams_client": None,
         "vector_store": None,
-        "connected": False,
-        "teams_list": [],
         "groups_list": [],
         "users_list": [],
         "channels_map": {},
@@ -29,8 +26,9 @@ def init_session_state():
         "sync_status": {},
         "chat_history": [],
         "syncing": False,
-        "auto_connect_attempted": False,
         "current_project": None,
+        "project_teams_client": None,
+        "project_teams_list": [],
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -43,60 +41,67 @@ def init_session_state():
             st.error(f"Failed to initialize vector store: {e}")
 
 
-def auto_connect_from_secrets():
-    if st.session_state.connected or st.session_state.auto_connect_attempted:
-        return
-    st.session_state.auto_connect_attempted = True
-
-    client_id = os.environ.get("AZURE_CLIENT_ID", "")
-    client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
-    tenant_id = os.environ.get("AZURE_TENANT_ID", "")
-
-    if not all([client_id, client_secret, tenant_id]):
-        return
-
-    try:
-        client = TeamsClient(client_id, client_secret, tenant_id)
-        teams = client.get_teams()
-        st.session_state.teams_client = client
-        st.session_state.teams_list = teams
-        st.session_state.connected = True
-        st.session_state.channels_map = {}
-    except Exception:
-        pass
-
-
 def get_current_project_id():
     proj = st.session_state.current_project
     return proj["id"] if proj else None
 
 
-def connect_to_teams():
-    client_id = st.session_state.get("input_client_id", "")
-    client_secret = st.session_state.get("input_client_secret", "")
-    tenant_id = st.session_state.get("input_tenant_id", "")
+def get_teams_source_for_project(project_id: str):
+    vs = st.session_state.vector_store
+    sources = vs.get_data_sources(project_id)
+    for src in sources:
+        if src["source_type"] == "microsoft_teams":
+            return src
+    return None
+
+
+def get_teams_client_for_project():
+    project = st.session_state.current_project
+    if not project:
+        return None
+
+    source = get_teams_source_for_project(project["id"])
+    if not source:
+        return None
+
+    config = source.get("config", {})
+    client_id = config.get("client_id", "")
+    client_secret = config.get("client_secret", "")
+    tenant_id = config.get("tenant_id", "")
 
     if not all([client_id, client_secret, tenant_id]):
-        st.error("Please fill in all Azure AD credentials.")
-        return
+        return None
+
+    cache_key = f"teams_client_{project['id']}"
+    if st.session_state.get(cache_key):
+        return st.session_state[cache_key]
 
     try:
         client = TeamsClient(client_id, client_secret, tenant_id)
-        teams = client.get_teams()
-        st.session_state.teams_client = client
-        st.session_state.teams_list = teams
-        st.session_state.connected = True
-        st.session_state.channels_map = {}
-        st.success(f"Connected successfully! Found {len(teams)} team(s).")
-    except Exception as e:
-        st.error(f"Connection failed: {str(e)}")
+        st.session_state[cache_key] = client
+        return client
+    except Exception:
+        return None
+
+
+def is_project_connected():
+    project = st.session_state.current_project
+    if not project:
+        return False
+    source = get_teams_source_for_project(project["id"])
+    if not source:
+        return False
+    config = source.get("config", {})
+    return all([config.get("client_id"), config.get("client_secret"), config.get("tenant_id")])
 
 
 def load_channels(team_id: str):
     if team_id in st.session_state.channels_map:
         return
     try:
-        client = st.session_state.teams_client
+        client = get_teams_client_for_project()
+        if not client:
+            return
         channels = client.get_channels(team_id)
         st.session_state.channels_map[team_id] = channels
     except Exception as e:
@@ -104,7 +109,9 @@ def load_channels(team_id: str):
 
 
 def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: str):
-    client = st.session_state.teams_client
+    client = get_teams_client_for_project()
+    if not client:
+        raise Exception("Teams client unavailable. Check your credentials in the Data Sources tab.")
     vs = st.session_state.vector_store
     project_id = get_current_project_id()
 
@@ -128,7 +135,9 @@ def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: st
 
 
 def sync_group_chat(chat_id: str, chat_name: str):
-    client = st.session_state.teams_client
+    client = get_teams_client_for_project()
+    if not client:
+        raise Exception("Teams client unavailable. Check your credentials in the Data Sources tab.")
     vs = st.session_state.vector_store
     project_id = get_current_project_id()
 
@@ -200,24 +209,78 @@ def render_project_manager():
                     if st.button("Select", key=f"sel_{proj['id']}"):
                         st.session_state.current_project = proj
                         st.session_state.groups_list = []
+                        st.session_state.users_list = []
                         st.session_state.chat_history = []
+                        st.session_state.channels_map = {}
                         st.rerun()
                 if st.button("Delete", key=f"del_{proj['id']}"):
                     vs.delete_project(proj["id"])
                     if is_selected:
                         st.session_state.current_project = None
+                    cache_key = f"teams_client_{proj['id']}"
+                    if cache_key in st.session_state:
+                        del st.session_state[cache_key]
                     st.rerun()
 
 
-def render_setup_page():
-    st.header("Connect to Microsoft Teams")
-    st.write(
-        "Enter your Azure AD app credentials to connect to Microsoft Teams. "
-        "You need an Azure AD app registration with the following API permissions:"
-    )
+def render_data_sources():
+    st.header("Data Sources")
 
-    with st.expander("Setup Instructions", expanded=False):
-        st.markdown("""
+    project = st.session_state.current_project
+    if not project:
+        st.warning("Please select a project first from the Project Manager tab.")
+        return
+
+    vs = st.session_state.vector_store
+    sources = vs.get_data_sources(project["id"])
+
+    st.write(f"Data sources for **{project['name']}**:")
+
+    if sources:
+        for src in sources:
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    source_label = src["source_type"].replace("_", " ").title()
+                    config = src.get("config", {})
+                    connected = all([config.get("client_id"), config.get("client_secret"), config.get("tenant_id")])
+                    status = "Connected" if connected else "Not configured"
+                    st.markdown(f"**{source_label}** — {status}")
+                    if config.get("tenant_id"):
+                        st.caption(f"Tenant: {config['tenant_id'][:8]}...")
+                with col2:
+                    if st.button("Remove", key=f"rm_src_{src['id']}"):
+                        vs.remove_data_source(src["id"], project["id"])
+                        for k in [f"teams_client_{project['id']}", f"teams_list_{project['id']}", f"users_list_{project['id']}"]:
+                            if k in st.session_state:
+                                del st.session_state[k]
+                        st.session_state.channels_map = {}
+                        st.session_state.groups_list = []
+                        st.rerun()
+
+    st.divider()
+    st.subheader("Add Data Source")
+
+    source_types = ["Microsoft Teams"]
+    selected_type = st.selectbox("Source Type", source_types)
+
+    if selected_type == "Microsoft Teams":
+        has_teams_source = any(s["source_type"] == "microsoft_teams" for s in sources)
+        if has_teams_source:
+            st.info("Microsoft Teams source already added to this project. Remove it first to add a new one.")
+
+            teams_source = next(s for s in sources if s["source_type"] == "microsoft_teams")
+            config = teams_source.get("config", {})
+            is_configured = all([config.get("client_id"), config.get("client_secret"), config.get("tenant_id")])
+
+            if not is_configured:
+                st.warning("This data source needs Azure AD credentials to connect.")
+
+            with st.expander("Update Credentials" if is_configured else "Configure Credentials", expanded=not is_configured):
+                _render_teams_credential_form(teams_source["id"], project["id"], config)
+        else:
+            with st.expander("Setup Instructions", expanded=False):
+                st.markdown("""
 **Step 1: Register an Azure AD Application**
 1. Go to [Azure Portal](https://portal.azure.com) > Azure Active Directory > App registrations
 2. Click "New registration"
@@ -244,63 +307,83 @@ def render_setup_page():
 **Step 4: Get your IDs**
 - **Client ID**: Found on the app's Overview page (Application ID)
 - **Tenant ID**: Found on the app's Overview page (Directory ID)
-        """)
+                """)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.text_input("Tenant ID", key="input_tenant_id", type="password")
-        st.text_input("Client ID", key="input_client_id", type="password")
-    with col2:
-        st.text_input("Client Secret", key="input_client_secret", type="password")
+            st.subheader("Enter Azure AD Credentials")
+            tenant_id = st.text_input("Tenant ID", key="new_ds_tenant_id", type="password")
+            client_id = st.text_input("Client ID", key="new_ds_client_id", type="password")
+            client_secret = st.text_input("Client Secret", key="new_ds_client_secret", type="password")
 
-    st.button("Connect to Teams", on_click=connect_to_teams, type="primary")
+            if st.button("Add Microsoft Teams", type="primary"):
+                if not all([tenant_id, client_id, client_secret]):
+                    st.error("Please fill in all three credential fields.")
+                else:
+                    with st.spinner("Verifying connection..."):
+                        try:
+                            test_client = TeamsClient(client_id, client_secret, tenant_id)
+                            test_client.get_teams()
+                            vs.add_data_source(
+                                project["id"],
+                                "microsoft_teams",
+                                {
+                                    "client_id": client_id,
+                                    "client_secret": client_secret,
+                                    "tenant_id": tenant_id,
+                                },
+                            )
+                            st.success("Microsoft Teams data source added and verified!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Connection failed: {str(e)}. Please check your credentials.")
 
 
-def render_data_sources():
-    st.header("Data Sources")
-
-    project = st.session_state.current_project
-    if not project:
-        st.warning("Please select a project first from the Project Manager tab.")
-        return
-
+def _render_teams_credential_form(source_id: str, project_id: str, current_config: dict):
     vs = st.session_state.vector_store
-    sources = vs.get_data_sources(project["id"])
 
-    st.write(f"Data sources for **{project['name']}**:")
+    tenant_id = st.text_input(
+        "Tenant ID",
+        value=current_config.get("tenant_id", ""),
+        key=f"upd_tenant_{source_id}",
+        type="password",
+    )
+    client_id = st.text_input(
+        "Client ID",
+        value=current_config.get("client_id", ""),
+        key=f"upd_client_{source_id}",
+        type="password",
+    )
+    client_secret = st.text_input(
+        "Client Secret",
+        value=current_config.get("client_secret", ""),
+        key=f"upd_secret_{source_id}",
+        type="password",
+    )
 
-    if sources:
-        for src in sources:
-            with st.container(border=True):
-                col1, col2 = st.columns([4, 1])
-                with col1:
-                    source_label = src["source_type"].replace("_", " ").title()
-                    st.markdown(f"**{source_label}**")
-                    if src["config"]:
-                        st.caption(f"Added: {src['created_at'][:10]}")
-                with col2:
-                    if st.button("Remove", key=f"rm_src_{src['id']}"):
-                        vs.remove_data_source(src["id"], project["id"])
-                        st.rerun()
-
-    st.divider()
-    st.subheader("Add Data Source")
-
-    source_types = ["Microsoft Teams"]
-    selected_type = st.selectbox("Source Type", source_types)
-
-    if selected_type == "Microsoft Teams":
-        has_teams_source = any(s["source_type"] == "microsoft_teams" for s in sources)
-        if has_teams_source:
-            st.info("Microsoft Teams source already added to this project.")
+    if st.button("Save & Verify", key=f"save_creds_{source_id}"):
+        if not all([tenant_id, client_id, client_secret]):
+            st.error("Please fill in all three credential fields.")
         else:
-            if st.session_state.connected:
-                if st.button("Add Microsoft Teams", type="primary"):
-                    vs.add_data_source(project["id"], "microsoft_teams", {"connected": True})
-                    st.success("Microsoft Teams data source added!")
+            with st.spinner("Verifying connection..."):
+                try:
+                    test_client = TeamsClient(client_id, client_secret, tenant_id)
+                    test_client.get_teams()
+                    vs.update_data_source_config(
+                        source_id,
+                        {
+                            "client_id": client_id,
+                            "client_secret": client_secret,
+                            "tenant_id": tenant_id,
+                        },
+                    )
+                    for k in [f"teams_client_{project_id}", f"teams_list_{project_id}", f"users_list_{project_id}"]:
+                        if k in st.session_state:
+                            del st.session_state[k]
+                    st.session_state.channels_map = {}
+                    st.session_state.groups_list = []
+                    st.success("Credentials updated and verified!")
                     st.rerun()
-            else:
-                st.warning("Please connect to Microsoft Teams first using the sidebar connection settings.")
+                except Exception as e:
+                    st.error(f"Connection failed: {str(e)}")
 
 
 def render_channel_selector():
@@ -311,19 +394,27 @@ def render_channel_selector():
         st.warning("Please select a project first from the Project Manager tab.")
         return
 
-    vs = st.session_state.vector_store
-    sources = vs.get_data_sources(project["id"])
-    has_teams = any(s["source_type"] == "microsoft_teams" for s in sources)
-    if not has_teams:
-        st.info("Add Microsoft Teams as a data source in the Data Sources tab first.")
+    if not is_project_connected():
+        st.info("Configure Microsoft Teams credentials in the Data Sources tab first.")
         return
 
-    if not st.session_state.connected:
-        st.warning("Not connected to Microsoft Teams. Connect using the sidebar.")
+    client = get_teams_client_for_project()
+    if not client:
+        st.error("Failed to connect to Microsoft Teams. Check your credentials in the Data Sources tab.")
         return
 
     project_id = project["id"]
-    teams = st.session_state.teams_list
+    vs = st.session_state.vector_store
+
+    teams_cache_key = f"teams_list_{project_id}"
+    if teams_cache_key not in st.session_state:
+        try:
+            st.session_state[teams_cache_key] = client.get_teams()
+        except Exception as e:
+            st.error(f"Failed to load teams: {str(e)}")
+            return
+
+    teams = st.session_state[teams_cache_key]
     if not teams:
         st.warning("No teams found. Check your permissions.")
         return
@@ -401,33 +492,31 @@ def render_group_chat_selector():
         st.warning("Please select a project first from the Project Manager tab.")
         return
 
-    vs = st.session_state.vector_store
-    sources = vs.get_data_sources(project["id"])
-    has_teams = any(s["source_type"] == "microsoft_teams" for s in sources)
-    if not has_teams:
-        st.info("Add Microsoft Teams as a data source in the Data Sources tab first.")
+    if not is_project_connected():
+        st.info("Configure Microsoft Teams credentials in the Data Sources tab first.")
         return
 
-    if not st.session_state.connected:
-        st.warning("Not connected to Microsoft Teams. Connect using the sidebar.")
+    client = get_teams_client_for_project()
+    if not client:
+        st.error("Failed to connect to Microsoft Teams. Check your credentials in the Data Sources tab.")
         return
 
-    client = st.session_state.teams_client
-
-    if not st.session_state.users_list:
+    users_cache_key = f"users_list_{project['id']}"
+    if users_cache_key not in st.session_state:
         with st.spinner("Loading users..."):
             try:
                 users = client.get_users()
-                st.session_state.users_list = users
+                st.session_state[users_cache_key] = users
             except Exception as e:
                 st.error(f"Failed to load users: {str(e)}")
                 return
 
-    users = st.session_state.users_list
+    users = st.session_state[users_cache_key]
     if not users:
         st.info("No users found. Make sure the app has User.Read.All permission.")
         return
 
+    vs = st.session_state.vector_store
     user_options = {f"{u['name']} ({u['email']})" if u['email'] else u['name']: u['id'] for u in users}
     selected_user_labels = st.multiselect(
         "Select users to load group chats from",
@@ -633,7 +722,6 @@ def render_chat():
 
 def main():
     init_session_state()
-    auto_connect_from_secrets()
 
     st.title("Teams Knowledge Base")
     st.caption("Extract, index, and query your Microsoft Teams conversations with AI")
@@ -663,41 +751,31 @@ def main():
     with st.sidebar:
         st.subheader("Current Project")
         if st.session_state.current_project:
-            st.success(f"**{st.session_state.current_project['name']}**")
+            proj = st.session_state.current_project
+            st.success(f"**{proj['name']}**")
+
+            vs = st.session_state.vector_store
+            stats = vs.get_stats(project_id=proj["id"])
+
+            connected = is_project_connected()
+            if connected:
+                st.caption("Teams: Connected")
+            else:
+                st.caption("Teams: Not configured")
+
+            st.metric("Messages Indexed", stats["total_messages"])
+
+            if stats["teams"]:
+                st.write("**Sources:**")
+                for t in stats["teams"]:
+                    st.write(f"  - {t}")
+
+            if stats["channels"]:
+                st.write("**Channels:**")
+                for c in stats["channels"]:
+                    st.write(f"  - {c}")
         else:
             st.warning("No project selected")
-
-        st.divider()
-
-        st.subheader("Teams Connection")
-        if st.session_state.connected:
-            st.success("Connected")
-            if st.session_state.current_project:
-                vs = st.session_state.vector_store
-                stats = vs.get_stats(project_id=st.session_state.current_project["id"])
-                st.metric("Messages Indexed", stats["total_messages"])
-
-                if stats["teams"]:
-                    st.write("**Sources:**")
-                    for t in stats["teams"]:
-                        st.write(f"  - {t}")
-
-                if stats["channels"]:
-                    st.write("**Channels:**")
-                    for c in stats["channels"]:
-                        st.write(f"  - {c}")
-
-            st.divider()
-            if st.button("Disconnect"):
-                st.session_state.connected = False
-                st.session_state.teams_client = None
-                st.session_state.teams_list = []
-                st.session_state.groups_list = []
-                st.session_state.users_list = []
-                st.session_state.channels_map = {}
-                st.rerun()
-        else:
-            render_setup_page()
 
         st.divider()
         st.caption("Powered by Microsoft Graph API & OpenAI")
