@@ -30,6 +30,7 @@ def init_session_state():
         "chat_history": [],
         "syncing": False,
         "auto_connect_attempted": False,
+        "current_project": None,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -63,6 +64,11 @@ def auto_connect_from_secrets():
         st.session_state.channels_map = {}
     except Exception:
         pass
+
+
+def get_current_project_id():
+    proj = st.session_state.current_project
+    return proj["id"] if proj else None
 
 
 def connect_to_teams():
@@ -100,8 +106,9 @@ def load_channels(team_id: str):
 def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: str):
     client = st.session_state.teams_client
     vs = st.session_state.vector_store
+    project_id = get_current_project_id()
 
-    last_sync_str = vs.get_last_sync(team_id, channel_id)
+    last_sync_str = vs.get_last_sync(team_id, channel_id, project_id=project_id)
     since = None
     if last_sync_str != "Never":
         try:
@@ -111,8 +118,8 @@ def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: st
 
     try:
         messages = client.get_channel_messages(team_id, channel_id, since=since)
-        added = vs.add_messages(messages, team_name, channel_name)
-        vs.update_sync_time(team_id, channel_id)
+        added = vs.add_messages(messages, team_name, channel_name, project_id=project_id)
+        vs.update_sync_time(team_id, channel_id, project_id=project_id)
         replies_count = sum(1 for m in messages if m.get("message_type") == "reply")
         posts_count = len(messages) - replies_count
         return added, len(messages), posts_count, replies_count
@@ -123,9 +130,10 @@ def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: st
 def sync_group_chat(chat_id: str, chat_name: str):
     client = st.session_state.teams_client
     vs = st.session_state.vector_store
+    project_id = get_current_project_id()
 
     sync_key = f"chat-{chat_id}"
-    last_sync_str = vs.get_last_sync(sync_key, "group_chat")
+    last_sync_str = vs.get_last_sync(sync_key, "group_chat", project_id=project_id)
     since = None
     if last_sync_str != "Never":
         try:
@@ -135,11 +143,70 @@ def sync_group_chat(chat_id: str, chat_name: str):
 
     try:
         messages = client.get_chat_messages(chat_id, since=since)
-        added = vs.add_messages(messages, chat_name, "Group Chat")
-        vs.update_sync_time(sync_key, "group_chat")
+        added = vs.add_messages(messages, chat_name, "Group Chat", project_id=project_id)
+        vs.update_sync_time(sync_key, "group_chat", project_id=project_id)
         return added, len(messages)
     except Exception as e:
         raise e
+
+
+def render_project_manager():
+    st.header("Project Manager")
+    vs = st.session_state.vector_store
+
+    projects = vs.get_projects()
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.subheader("Your Projects")
+    with col2:
+        with st.popover("Create New Project"):
+            new_name = st.text_input("Project Name", key="new_project_name")
+            new_desc = st.text_input("Description (optional)", key="new_project_desc")
+            if st.button("Create", type="primary"):
+                if new_name:
+                    try:
+                        project = vs.create_project(new_name, new_desc)
+                        st.session_state.current_project = project
+                        st.success(f"Project '{new_name}' created!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to create project: {e}")
+                else:
+                    st.warning("Please enter a project name.")
+
+    if not projects:
+        st.info("No projects yet. Create one to get started!")
+        return
+
+    for proj in projects:
+        proj_stats = vs.get_stats(project_id=proj["id"])
+        sources = vs.get_data_sources(proj["id"])
+        is_selected = st.session_state.current_project and st.session_state.current_project["id"] == proj["id"]
+
+        with st.container(border=True):
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                label = f"**{proj['name']}**"
+                if is_selected:
+                    label += " (Active)"
+                st.markdown(label)
+                if proj["description"]:
+                    st.caption(proj["description"])
+            with col2:
+                st.caption(f"{proj_stats['total_messages']} messages | {len(sources)} data source(s)")
+            with col3:
+                if not is_selected:
+                    if st.button("Select", key=f"sel_{proj['id']}"):
+                        st.session_state.current_project = proj
+                        st.session_state.groups_list = []
+                        st.session_state.chat_history = []
+                        st.rerun()
+                if st.button("Delete", key=f"del_{proj['id']}"):
+                    vs.delete_project(proj["id"])
+                    if is_selected:
+                        st.session_state.current_project = None
+                    st.rerun()
 
 
 def render_setup_page():
@@ -189,9 +256,73 @@ def render_setup_page():
     st.button("Connect to Teams", on_click=connect_to_teams, type="primary")
 
 
-def render_channel_selector():
-    st.header("Select Channels to Monitor")
+def render_data_sources():
+    st.header("Data Sources")
 
+    project = st.session_state.current_project
+    if not project:
+        st.warning("Please select a project first from the Project Manager tab.")
+        return
+
+    vs = st.session_state.vector_store
+    sources = vs.get_data_sources(project["id"])
+
+    st.write(f"Data sources for **{project['name']}**:")
+
+    if sources:
+        for src in sources:
+            with st.container(border=True):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    source_label = src["source_type"].replace("_", " ").title()
+                    st.markdown(f"**{source_label}**")
+                    if src["config"]:
+                        st.caption(f"Added: {src['created_at'][:10]}")
+                with col2:
+                    if st.button("Remove", key=f"rm_src_{src['id']}"):
+                        vs.remove_data_source(src["id"], project["id"])
+                        st.rerun()
+
+    st.divider()
+    st.subheader("Add Data Source")
+
+    source_types = ["Microsoft Teams"]
+    selected_type = st.selectbox("Source Type", source_types)
+
+    if selected_type == "Microsoft Teams":
+        has_teams_source = any(s["source_type"] == "microsoft_teams" for s in sources)
+        if has_teams_source:
+            st.info("Microsoft Teams source already added to this project.")
+        else:
+            if st.session_state.connected:
+                if st.button("Add Microsoft Teams", type="primary"):
+                    vs.add_data_source(project["id"], "microsoft_teams", {"connected": True})
+                    st.success("Microsoft Teams data source added!")
+                    st.rerun()
+            else:
+                st.warning("Please connect to Microsoft Teams first using the sidebar connection settings.")
+
+
+def render_channel_selector():
+    st.header("Sync Teams Channels")
+
+    project = st.session_state.current_project
+    if not project:
+        st.warning("Please select a project first from the Project Manager tab.")
+        return
+
+    vs = st.session_state.vector_store
+    sources = vs.get_data_sources(project["id"])
+    has_teams = any(s["source_type"] == "microsoft_teams" for s in sources)
+    if not has_teams:
+        st.info("Add Microsoft Teams as a data source in the Data Sources tab first.")
+        return
+
+    if not st.session_state.connected:
+        st.warning("Not connected to Microsoft Teams. Connect using the sidebar.")
+        return
+
+    project_id = project["id"]
     teams = st.session_state.teams_list
     if not teams:
         st.warning("No teams found. Check your permissions.")
@@ -214,8 +345,7 @@ def render_channel_selector():
 
             selected = []
             for ch in channels:
-                vs = st.session_state.vector_store
-                last_sync = vs.get_last_sync(team_id, ch["id"])
+                last_sync = vs.get_last_sync(team_id, ch["id"], project_id=project_id)
                 label = f"{ch['name']}"
                 if ch.get("description"):
                     label += f" — {ch['description']}"
@@ -264,10 +394,25 @@ def render_channel_selector():
 
 
 def render_group_chat_selector():
-    st.header("Select Group Chats to Sync")
+    st.header("Sync Group Chats")
+
+    project = st.session_state.current_project
+    if not project:
+        st.warning("Please select a project first from the Project Manager tab.")
+        return
+
+    vs = st.session_state.vector_store
+    sources = vs.get_data_sources(project["id"])
+    has_teams = any(s["source_type"] == "microsoft_teams" for s in sources)
+    if not has_teams:
+        st.info("Add Microsoft Teams as a data source in the Data Sources tab first.")
+        return
+
+    if not st.session_state.connected:
+        st.warning("Not connected to Microsoft Teams. Connect using the sidebar.")
+        return
 
     client = st.session_state.teams_client
-    vs = st.session_state.vector_store
 
     if not st.session_state.users_list:
         with st.spinner("Loading users..."):
@@ -314,7 +459,7 @@ def render_group_chat_selector():
     selected_chats = []
     for chat in chats:
         sync_key = f"chat-{chat['id']}"
-        last_sync = vs.get_last_sync(sync_key, "group_chat")
+        last_sync = vs.get_last_sync(sync_key, "group_chat", project_id=project["id"])
         label = chat["name"]
         members_str = f"{chat['member_count']} members"
 
@@ -355,60 +500,72 @@ def render_group_chat_selector():
 def render_knowledge_base():
     st.header("Knowledge Base")
 
+    project = st.session_state.current_project
+    if not project:
+        st.warning("Please select a project first from the Project Manager tab.")
+        return
+
     vs = st.session_state.vector_store
-    stats = vs.get_stats()
+    project_id = project["id"]
+    stats = vs.get_stats(project_id=project_id)
 
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Total Messages", stats["total_messages"])
     with col2:
-        st.metric("Teams Indexed", len(stats["teams"]))
+        st.metric("Teams/Sources Indexed", len(stats["teams"]))
     with col3:
         st.metric("Channels Indexed", len(stats["channels"]))
 
     if stats["total_messages"] == 0:
-        st.info("No messages indexed yet. Go to the Channel Selector tab and sync some channels first.")
+        st.info("No messages indexed yet. Go to the Channels or Group Chats tab and sync some data first.")
         return
 
     st.subheader("Quick Actions")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Generate Channel Summary"):
+        if st.button("Generate Summary"):
             with st.spinner("Generating summary..."):
-                results = vs.search("project status updates decisions", n_results=30)
+                results = vs.search("project status updates decisions", n_results=30, project_id=project_id)
                 if results:
                     summary = summarize_channel(results)
                     st.markdown(summary)
                 else:
                     st.warning("No messages found to summarize.")
     with col2:
-        if st.button("Clear Knowledge Base"):
-            vs.clear_all()
-            st.success("Knowledge base cleared.")
+        if st.button("Clear Project Data"):
+            vs.clear_project(project_id)
+            st.success("Project data cleared.")
             st.rerun()
 
 
 def render_chat():
-    st.header("Ask About Your Projects")
+    st.header("Ask About Your Project")
 
-    vs = st.session_state.vector_store
-    stats = vs.get_stats()
-
-    if stats["total_messages"] == 0:
-        st.info("No messages indexed yet. Sync some channels first to start asking questions.")
+    project = st.session_state.current_project
+    if not project:
+        st.warning("Please select a project first from the Project Manager tab.")
         return
 
-    st.write("Ask questions about project discussions, requirements, commitments, or any topic from your Teams conversations.")
+    vs = st.session_state.vector_store
+    project_id = project["id"]
+    stats = vs.get_stats(project_id=project_id)
+
+    if stats["total_messages"] == 0:
+        st.info("No messages indexed yet. Sync some data first to start asking questions.")
+        return
+
+    st.write(f"Ask questions about **{project['name']}** — based on indexed conversations and data sources.")
 
     filter_team = None
     filter_channel = None
     with st.expander("Filters (optional)"):
         if stats["teams"]:
             filter_team = st.selectbox(
-                "Filter by Team",
-                options=["All Teams"] + stats["teams"],
+                "Filter by Source/Team",
+                options=["All"] + stats["teams"],
             )
-            if filter_team == "All Teams":
+            if filter_team == "All":
                 filter_team = None
         if stats["channels"]:
             filter_channel = st.selectbox(
@@ -422,13 +579,13 @@ def render_chat():
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    if prompt := st.chat_input("Ask a question about your Teams conversations..."):
+    if prompt := st.chat_input("Ask a question about your project..."):
         st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
         with st.chat_message("assistant"):
-            with st.spinner("Searching conversations and generating answer..."):
+            with st.spinner("Searching and generating answer..."):
                 filters = {}
                 if filter_team:
                     filters["team"] = filter_team
@@ -439,6 +596,7 @@ def render_chat():
                     prompt,
                     n_results=20,
                     filters=filters if filters else None,
+                    project_id=project_id,
                 )
 
                 try:
@@ -480,41 +638,54 @@ def main():
     st.title("Teams Knowledge Base")
     st.caption("Extract, index, and query your Microsoft Teams conversations with AI")
 
-    if not st.session_state.connected:
-        render_setup_page()
-    else:
-        tab1, tab2, tab3, tab4 = st.tabs([
-            "Channel Selector",
-            "Group Chats",
-            "Knowledge Base",
-            "Ask Questions",
-        ])
+    tab_projects, tab_sources, tab_channels, tab_chats, tab_kb, tab_ask = st.tabs([
+        "Projects",
+        "Data Sources",
+        "Channels",
+        "Group Chats",
+        "Knowledge Base",
+        "Ask Questions",
+    ])
 
-        with tab1:
-            render_channel_selector()
-        with tab2:
-            render_group_chat_selector()
-        with tab3:
-            render_knowledge_base()
-        with tab4:
-            render_chat()
+    with tab_projects:
+        render_project_manager()
+    with tab_sources:
+        render_data_sources()
+    with tab_channels:
+        render_channel_selector()
+    with tab_chats:
+        render_group_chat_selector()
+    with tab_kb:
+        render_knowledge_base()
+    with tab_ask:
+        render_chat()
 
-        with st.sidebar:
-            st.subheader("Connection Status")
-            st.success("Connected to Teams")
+    with st.sidebar:
+        st.subheader("Current Project")
+        if st.session_state.current_project:
+            st.success(f"**{st.session_state.current_project['name']}**")
+        else:
+            st.warning("No project selected")
 
-            stats = st.session_state.vector_store.get_stats()
-            st.metric("Messages Indexed", stats["total_messages"])
+        st.divider()
 
-            if stats["teams"]:
-                st.write("**Indexed Teams:**")
-                for t in stats["teams"]:
-                    st.write(f"  - {t}")
+        st.subheader("Teams Connection")
+        if st.session_state.connected:
+            st.success("Connected")
+            if st.session_state.current_project:
+                vs = st.session_state.vector_store
+                stats = vs.get_stats(project_id=st.session_state.current_project["id"])
+                st.metric("Messages Indexed", stats["total_messages"])
 
-            if stats["channels"]:
-                st.write("**Indexed Channels:**")
-                for c in stats["channels"]:
-                    st.write(f"  - {c}")
+                if stats["teams"]:
+                    st.write("**Sources:**")
+                    for t in stats["teams"]:
+                        st.write(f"  - {t}")
+
+                if stats["channels"]:
+                    st.write("**Channels:**")
+                    for c in stats["channels"]:
+                        st.write(f"  - {c}")
 
             st.divider()
             if st.button("Disconnect"):
@@ -525,9 +696,11 @@ def main():
                 st.session_state.users_list = []
                 st.session_state.channels_map = {}
                 st.rerun()
+        else:
+            render_setup_page()
 
-            st.divider()
-            st.caption("Powered by Microsoft Graph API & OpenAI")
+        st.divider()
+        st.caption("Powered by Microsoft Graph API & OpenAI")
 
 
 if __name__ == "__main__":

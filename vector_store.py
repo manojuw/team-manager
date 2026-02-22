@@ -1,4 +1,5 @@
 import os
+import json
 import hashlib
 import logging
 import psycopg2
@@ -58,7 +59,8 @@ class VectorStore:
                         message_type TEXT DEFAULT 'message',
                         message_id TEXT,
                         parent_message_id TEXT,
-                        indexed_at TIMESTAMPTZ DEFAULT NOW()
+                        indexed_at TIMESTAMPTZ DEFAULT NOW(),
+                        project_id TEXT
                     );
                 """)
                 cur.execute("""
@@ -67,7 +69,25 @@ class VectorStore:
                         team_id TEXT NOT NULL,
                         channel_id TEXT NOT NULL,
                         last_sync TEXT NOT NULL,
-                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                        updated_at TIMESTAMPTZ DEFAULT NOW(),
+                        project_id TEXT
+                    );
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS projects (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        description TEXT DEFAULT '',
+                        created_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS project_data_sources (
+                        id TEXT PRIMARY KEY,
+                        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                        source_type TEXT NOT NULL,
+                        config JSONB DEFAULT '{}',
+                        created_at TIMESTAMPTZ DEFAULT NOW()
                     );
                 """)
                 cur.execute("""
@@ -82,6 +102,14 @@ class VectorStore:
                     CREATE INDEX IF NOT EXISTS idx_teams_messages_sender
                     ON teams_messages(sender);
                 """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_teams_messages_project
+                    ON teams_messages(project_id);
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_sync_metadata_project
+                    ON sync_metadata(project_id);
+                """)
                 cur.execute(f"""
                     CREATE INDEX IF NOT EXISTS idx_teams_messages_embedding
                     ON teams_messages
@@ -90,11 +118,93 @@ class VectorStore:
                 """)
             conn.commit()
 
-    def _make_id(self, message: dict) -> str:
-        raw = f"{message.get('id', '')}-{message.get('created_at', '')}-{message.get('sender', '')}"
+    def create_project(self, name: str, description: str = "") -> dict:
+        project_id = hashlib.md5(f"{name}-{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO projects (id, name, description) VALUES (%s, %s, %s)",
+                        (project_id, name, description),
+                    )
+                conn.commit()
+            return {"id": project_id, "name": name, "description": description}
+        except Exception as e:
+            logger.error(f"Create project failed: {e}")
+            raise
+
+    def get_projects(self) -> list:
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT id, name, description, created_at FROM projects ORDER BY created_at DESC")
+                    return [
+                        {"id": row[0], "name": row[1], "description": row[2], "created_at": str(row[3])}
+                        for row in cur.fetchall()
+                    ]
+        except Exception as e:
+            logger.error(f"Get projects failed: {e}")
+            return []
+
+    def delete_project(self, project_id: str):
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM teams_messages WHERE project_id = %s", (project_id,))
+                    cur.execute("DELETE FROM sync_metadata WHERE project_id = %s", (project_id,))
+                    cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Delete project failed: {e}")
+            raise
+
+    def add_data_source(self, project_id: str, source_type: str, config: dict = None) -> dict:
+        source_id = hashlib.md5(f"{project_id}-{source_type}-{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()
+        config_json = json.dumps(config or {})
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO project_data_sources (id, project_id, source_type, config) VALUES (%s, %s, %s, %s)",
+                        (source_id, project_id, source_type, config_json),
+                    )
+                conn.commit()
+            return {"id": source_id, "project_id": project_id, "source_type": source_type, "config": config or {}}
+        except Exception as e:
+            logger.error(f"Add data source failed: {e}")
+            raise
+
+    def get_data_sources(self, project_id: str) -> list:
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT id, source_type, config, created_at FROM project_data_sources WHERE project_id = %s ORDER BY created_at",
+                        (project_id,),
+                    )
+                    return [
+                        {"id": row[0], "source_type": row[1], "config": row[2] if isinstance(row[2], dict) else json.loads(row[2] or "{}"), "created_at": str(row[3])}
+                        for row in cur.fetchall()
+                    ]
+        except Exception as e:
+            logger.error(f"Get data sources failed: {e}")
+            return []
+
+    def remove_data_source(self, source_id: str, project_id: str):
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM project_data_sources WHERE id = %s AND project_id = %s", (source_id, project_id))
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Remove data source failed: {e}")
+            raise
+
+    def _make_id(self, message: dict, project_id: str = None) -> str:
+        raw = f"{project_id or ''}-{message.get('id', '')}-{message.get('created_at', '')}-{message.get('sender', '')}"
         return hashlib.md5(raw.encode()).hexdigest()
 
-    def add_messages(self, messages: list, team_name: str, channel_name: str) -> int:
+    def add_messages(self, messages: list, team_name: str, channel_name: str, project_id: str = None) -> int:
         if not messages:
             return 0
 
@@ -108,7 +218,7 @@ class VectorStore:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
                     for msg in batch:
-                        doc_id = self._make_id(msg)
+                        doc_id = self._make_id(msg, project_id)
                         cur.execute(
                             "SELECT 1 FROM teams_messages WHERE id = %s", (doc_id,)
                         )
@@ -141,8 +251,8 @@ class VectorStore:
                             """
                             INSERT INTO teams_messages 
                                 (id, content, embedding, sender, created_at, team, channel, 
-                                 message_type, message_id, parent_message_id)
-                            VALUES (%s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s)
+                                 message_type, message_id, parent_message_id, project_id)
+                            VALUES (%s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (id) DO NOTHING
                             """,
                             (
@@ -156,15 +266,16 @@ class VectorStore:
                                 msg.get("message_type", "message"),
                                 msg.get("id", ""),
                                 msg.get("parent_message_id"),
+                                project_id,
                             ),
                         )
                         added += 1
                 conn.commit()
 
-        logger.info(f"Added {added} new messages to PostgreSQL vector store")
+        logger.info(f"Added {added} new messages to PostgreSQL vector store (project={project_id})")
         return added
 
-    def search(self, query: str, n_results: int = 20, filters: dict = None) -> list:
+    def search(self, query: str, n_results: int = 20, filters: dict = None, project_id: str = None) -> list:
         try:
             query_embedding = get_embedding(query)
         except Exception as e:
@@ -175,6 +286,10 @@ class VectorStore:
 
         where_clauses = []
         filter_params = []
+
+        if project_id:
+            where_clauses.append("project_id = %s")
+            filter_params.append(project_id)
 
         if filters:
             if filters.get("team"):
@@ -230,48 +345,63 @@ class VectorStore:
 
         return results
 
-    def get_stats(self) -> dict:
+    def get_stats(self, project_id: str = None) -> dict:
         stats = {"total_messages": 0, "teams": [], "channels": []}
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM teams_messages")
+                    if project_id:
+                        cur.execute("SELECT COUNT(*) FROM teams_messages WHERE project_id = %s", (project_id,))
+                    else:
+                        cur.execute("SELECT COUNT(*) FROM teams_messages")
                     stats["total_messages"] = cur.fetchone()[0]
 
-                    cur.execute(
-                        "SELECT DISTINCT team FROM teams_messages WHERE team IS NOT NULL"
-                    )
+                    if project_id:
+                        cur.execute(
+                            "SELECT DISTINCT team FROM teams_messages WHERE team IS NOT NULL AND project_id = %s",
+                            (project_id,),
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT DISTINCT team FROM teams_messages WHERE team IS NOT NULL"
+                        )
                     stats["teams"] = [row[0] for row in cur.fetchall()]
 
-                    cur.execute(
-                        "SELECT DISTINCT channel FROM teams_messages WHERE channel IS NOT NULL"
-                    )
+                    if project_id:
+                        cur.execute(
+                            "SELECT DISTINCT channel FROM teams_messages WHERE channel IS NOT NULL AND project_id = %s",
+                            (project_id,),
+                        )
+                    else:
+                        cur.execute(
+                            "SELECT DISTINCT channel FROM teams_messages WHERE channel IS NOT NULL"
+                        )
                     stats["channels"] = [row[0] for row in cur.fetchall()]
         except Exception as e:
             logger.error(f"Stats query failed: {e}")
 
         return stats
 
-    def update_sync_time(self, team_id: str, channel_id: str):
-        sync_id = f"sync-{team_id}-{channel_id}"
+    def update_sync_time(self, team_id: str, channel_id: str, project_id: str = None):
+        sync_id = f"sync-{project_id or 'global'}-{team_id}-{channel_id}"
         now = datetime.now(timezone.utc).isoformat()
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO sync_metadata (id, team_id, channel_id, last_sync, updated_at)
-                        VALUES (%s, %s, %s, %s, NOW())
+                        INSERT INTO sync_metadata (id, team_id, channel_id, last_sync, updated_at, project_id)
+                        VALUES (%s, %s, %s, %s, NOW(), %s)
                         ON CONFLICT (id) DO UPDATE SET last_sync = %s, updated_at = NOW()
                         """,
-                        (sync_id, team_id, channel_id, now, now),
+                        (sync_id, team_id, channel_id, now, project_id, now),
                     )
                 conn.commit()
         except Exception as e:
             logger.error(f"Sync time update failed: {e}")
 
-    def get_last_sync(self, team_id: str, channel_id: str) -> str:
-        sync_id = f"sync-{team_id}-{channel_id}"
+    def get_last_sync(self, team_id: str, channel_id: str, project_id: str = None) -> str:
+        sync_id = f"sync-{project_id or 'global'}-{team_id}-{channel_id}"
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
@@ -285,6 +415,17 @@ class VectorStore:
         except Exception as e:
             logger.error(f"Last sync query failed: {e}")
         return "Never"
+
+    def clear_project(self, project_id: str):
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM teams_messages WHERE project_id = %s", (project_id,))
+                    cur.execute("DELETE FROM sync_metadata WHERE project_id = %s", (project_id,))
+                conn.commit()
+            logger.info(f"Cleared all data for project {project_id}")
+        except Exception as e:
+            logger.error(f"Clear project failed: {e}")
 
     def clear_all(self):
         try:
