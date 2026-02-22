@@ -21,6 +21,7 @@ def init_session_state():
         "vector_store": None,
         "connected": False,
         "teams_list": [],
+        "groups_list": [],
         "channels_map": {},
         "selected_team": None,
         "selected_channels": [],
@@ -114,6 +115,28 @@ def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: st
         replies_count = sum(1 for m in messages if m.get("message_type") == "reply")
         posts_count = len(messages) - replies_count
         return added, len(messages), posts_count, replies_count
+    except Exception as e:
+        raise e
+
+
+def sync_group(group_id: str, group_name: str):
+    client = st.session_state.teams_client
+    vs = st.session_state.vector_store
+
+    sync_key = f"group-{group_id}"
+    last_sync_str = vs.get_last_sync(sync_key, "conversations")
+    since = None
+    if last_sync_str != "Never":
+        try:
+            since = datetime.fromisoformat(last_sync_str)
+        except (ValueError, TypeError):
+            since = None
+
+    try:
+        messages = client.get_group_threads(group_id, since=since)
+        added = vs.add_messages(messages, group_name, "Group Conversations")
+        vs.update_sync_time(sync_key, "conversations")
+        return added, len(messages)
     except Exception as e:
         raise e
 
@@ -236,6 +259,80 @@ def render_channel_selector():
                     st.success(f"Sync complete! Added {total_added} new messages total.")
         else:
             st.warning("No channels found in this team.")
+
+
+def render_group_selector():
+    st.header("Select Groups to Sync")
+
+    client = st.session_state.teams_client
+    vs = st.session_state.vector_store
+
+    if not st.session_state.groups_list:
+        with st.spinner("Loading groups..."):
+            try:
+                groups = client.get_groups()
+                st.session_state.groups_list = groups
+            except Exception as e:
+                st.error(f"Failed to load groups: {str(e)}")
+                return
+
+    groups = st.session_state.groups_list
+    if not groups:
+        st.info("No Microsoft 365 Groups found. Check your permissions.")
+        return
+
+    groups_only = [g for g in groups if not g.get("has_team")]
+    groups_with_teams = [g for g in groups if g.get("has_team")]
+
+    if groups_only:
+        st.subheader(f"Groups ({len(groups_only)})")
+        selected_groups = []
+        for g in groups_only:
+            sync_key = f"group-{g['id']}"
+            last_sync = vs.get_last_sync(sync_key, "conversations")
+            label = g["name"]
+            if g.get("description"):
+                label += f" — {g['description']}"
+
+            col1, col2, col3 = st.columns([3, 2, 1])
+            with col1:
+                if st.checkbox(label, key=f"grp_{g['id']}"):
+                    selected_groups.append(g)
+            with col2:
+                st.caption(f"Last sync: {last_sync}")
+            with col3:
+                if st.button("Sync", key=f"sync_grp_{g['id']}"):
+                    with st.spinner(f"Syncing {g['name']}..."):
+                        try:
+                            added, total = sync_group(g["id"], g["name"])
+                            st.success(
+                                f"Synced {g['name']}: {added} new items added "
+                                f"({total} posts fetched)"
+                            )
+                        except Exception as e:
+                            st.error(f"Sync failed for {g['name']}: {str(e)}")
+
+        if selected_groups:
+            if st.button("Sync All Selected Groups", type="primary"):
+                progress = st.progress(0)
+                total_added = 0
+                for i, g in enumerate(selected_groups):
+                    with st.spinner(f"Syncing {g['name']}..."):
+                        try:
+                            added, _ = sync_group(g["id"], g["name"])
+                            total_added += added
+                        except Exception as e:
+                            st.error(f"Failed: {g['name']}: {str(e)}")
+                    progress.progress((i + 1) / len(selected_groups))
+                st.success(f"Sync complete! Added {total_added} new messages total.")
+    else:
+        st.info("No standalone Groups found (all groups are associated with Teams).")
+
+    if groups_with_teams:
+        with st.expander(f"Groups with Teams ({len(groups_with_teams)})"):
+            st.caption("These groups are linked to Teams. You can sync their channels from the Channel Selector tab.")
+            for g in groups_with_teams:
+                st.write(f"- {g['name']}")
 
 
 def render_knowledge_base():
@@ -369,8 +466,9 @@ def main():
     if not st.session_state.connected:
         render_setup_page()
     else:
-        tab1, tab2, tab3 = st.tabs([
+        tab1, tab2, tab3, tab4 = st.tabs([
             "Channel Selector",
+            "Group Selector",
             "Knowledge Base",
             "Ask Questions",
         ])
@@ -378,8 +476,10 @@ def main():
         with tab1:
             render_channel_selector()
         with tab2:
-            render_knowledge_base()
+            render_group_selector()
         with tab3:
+            render_knowledge_base()
+        with tab4:
             render_chat()
 
         with st.sidebar:
@@ -404,6 +504,7 @@ def main():
                 st.session_state.connected = False
                 st.session_state.teams_client = None
                 st.session_state.teams_list = []
+                st.session_state.groups_list = []
                 st.session_state.channels_map = {}
                 st.rerun()
 

@@ -195,6 +195,101 @@ class TeamsClient:
 
         return results
 
+    def get_groups(self) -> list:
+        url = (
+            f"{GRAPH_API_BASE}/groups"
+            f"?$filter=groupTypes/any(g:g eq 'Unified')"
+            f"&$count=true"
+            f"&$select=id,displayName,description,resourceProvisioningOptions"
+        )
+        groups = self._get_all_pages(url, advanced_query=True)
+        return [
+            {
+                "id": g["id"],
+                "name": g.get("displayName", "Unknown"),
+                "description": g.get("description", ""),
+                "has_team": "Team" in g.get("resourceProvisioningOptions", []),
+            }
+            for g in groups
+        ]
+
+    def get_group_threads(
+        self, group_id: str, since: datetime = None, top: int = 50
+    ) -> list:
+        url = f"{GRAPH_API_BASE}/groups/{group_id}/threads"
+        params = {"$top": top}
+        threads = self._get_all_pages(url, params=params, max_pages=20)
+
+        logger.info(
+            f"Fetched {len(threads)} group threads from API (since={since})"
+        )
+
+        results = []
+        for thread in threads:
+            thread_id = thread.get("id", "")
+            last_delivered = thread.get("lastDeliveredDateTime", "")
+            topic = thread.get("topic", "")
+
+            if since and last_delivered:
+                try:
+                    thread_time = datetime.fromisoformat(last_delivered.replace("Z", "+00:00"))
+                    if thread_time < since:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            posts = self._get_group_thread_posts(group_id, thread_id, since)
+            for post in posts:
+                if topic and not post["content"].startswith(f"[Topic: {topic}]"):
+                    post["content"] = f"[Topic: {topic}] {post['content']}"
+                post["parent_message_id"] = thread_id
+            results.extend(posts)
+
+        logger.info(
+            f"Group sync results: {len(results)} total posts from {len(threads)} threads"
+        )
+        return results
+
+    def _get_group_thread_posts(
+        self, group_id: str, thread_id: str, since: datetime = None
+    ) -> list:
+        if not thread_id:
+            return []
+        url = f"{GRAPH_API_BASE}/groups/{group_id}/threads/{thread_id}/posts"
+        try:
+            posts = self._get_all_pages(url, max_pages=10)
+        except requests.exceptions.HTTPError:
+            return []
+
+        results = []
+        for post in posts:
+            created = post.get("createdDateTime", "")
+
+            body = post.get("body", {})
+            content = body.get("content", "")
+            content_type = body.get("contentType", "text")
+
+            if content_type == "html":
+                import re
+                content = re.sub(r"<[^>]+>", " ", content)
+                content = re.sub(r"\s+", " ", content).strip()
+
+            sender = post.get("from", {})
+            email_addr = sender.get("emailAddress", {}) if sender else {}
+            sender_name = email_addr.get("name", "Unknown") if email_addr else "Unknown"
+
+            if content.strip():
+                results.append({
+                    "id": post.get("id", ""),
+                    "content": content,
+                    "sender": sender_name,
+                    "created_at": created,
+                    "attachments": [],
+                    "message_type": "group_post",
+                })
+
+        return results
+
     def get_chat_messages(self, chat_id: str, since: datetime = None, top: int = 50) -> list:
         url = f"{GRAPH_API_BASE}/chats/{chat_id}/messages"
         params = {"$top": top}
