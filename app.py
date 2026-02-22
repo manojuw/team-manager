@@ -24,10 +24,34 @@ def init_session_state():
         "sync_status": {},
         "chat_history": [],
         "syncing": False,
+        "auto_connect_attempted": False,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
+
+
+def auto_connect_from_secrets():
+    if st.session_state.connected or st.session_state.auto_connect_attempted:
+        return
+    st.session_state.auto_connect_attempted = True
+
+    client_id = os.environ.get("AZURE_CLIENT_ID", "")
+    client_secret = os.environ.get("AZURE_CLIENT_SECRET", "")
+    tenant_id = os.environ.get("AZURE_TENANT_ID", "")
+
+    if not all([client_id, client_secret, tenant_id]):
+        return
+
+    try:
+        client = TeamsClient(client_id, client_secret, tenant_id)
+        teams = client.get_teams()
+        st.session_state.teams_client = client
+        st.session_state.teams_list = teams
+        st.session_state.connected = True
+        st.session_state.channels_map = {}
+    except Exception:
+        pass
 
 
 def connect_to_teams():
@@ -323,6 +347,7 @@ def render_chat():
 
 def main():
     init_session_state()
+    auto_connect_from_secrets()
 
     st.title("Teams Knowledge Base")
     st.caption("Extract, index, and query your Microsoft Teams conversations with AI")
