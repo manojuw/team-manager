@@ -1,11 +1,11 @@
-modules = ["python-3.11"]
+modules = ["python-3.11", "postgresql-16"]
 [deployment]
 deploymentTarget = "autoscale"
 run = ["streamlit", "run", "app.py", "--server.port", "5000"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["glibcLocales"]
+packages = ["glibcLocales", "postgresql"]
 
 [agent]
 integrations = ["python_openai_ai_integrations:1.0.0", "python_openai:1.0.0"]
