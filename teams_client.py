@@ -94,45 +94,48 @@ class TeamsClient:
         results = []
         for msg in messages:
             created = msg.get("createdDateTime", "")
+
+            is_new_message = True
             if since and created:
                 try:
                     msg_time = datetime.fromisoformat(created.replace("Z", "+00:00"))
                     if msg_time <= since:
-                        continue
+                        is_new_message = False
                 except (ValueError, TypeError):
                     pass
 
-            body = msg.get("body", {})
-            content = body.get("content", "")
-            content_type = body.get("contentType", "text")
+            if is_new_message:
+                body = msg.get("body", {})
+                content = body.get("content", "")
+                content_type = body.get("contentType", "text")
 
-            if content_type == "html":
-                import re
-                content = re.sub(r"<[^>]+>", " ", content)
-                content = re.sub(r"\s+", " ", content).strip()
+                if content_type == "html":
+                    import re
+                    content = re.sub(r"<[^>]+>", " ", content)
+                    content = re.sub(r"\s+", " ", content).strip()
 
-            sender = msg.get("from", {})
-            user_info = sender.get("user", {}) if sender else {}
-            sender_name = user_info.get("displayName", "Unknown") if user_info else "System"
+                sender = msg.get("from", {})
+                user_info = sender.get("user", {}) if sender else {}
+                sender_name = user_info.get("displayName", "Unknown") if user_info else "System"
 
-            attachments = msg.get("attachments", [])
-            attachment_info = []
-            for att in attachments:
-                attachment_info.append({
-                    "name": att.get("name", ""),
-                    "content_type": att.get("contentType", ""),
-                    "content_url": att.get("contentUrl", ""),
-                })
+                attachments = msg.get("attachments", [])
+                attachment_info = []
+                for att in attachments:
+                    attachment_info.append({
+                        "name": att.get("name", ""),
+                        "content_type": att.get("contentType", ""),
+                        "content_url": att.get("contentUrl", ""),
+                    })
 
-            if content.strip():
-                results.append({
-                    "id": msg.get("id", ""),
-                    "content": content,
-                    "sender": sender_name,
-                    "created_at": created,
-                    "attachments": attachment_info,
-                    "message_type": msg.get("messageType", "message"),
-                })
+                if content.strip():
+                    results.append({
+                        "id": msg.get("id", ""),
+                        "content": content,
+                        "sender": sender_name,
+                        "created_at": created,
+                        "attachments": attachment_info,
+                        "message_type": msg.get("messageType", "message"),
+                    })
 
             replies = self._get_message_replies(team_id, channel_id, msg.get("id", ""))
             for reply in replies:
