@@ -22,6 +22,7 @@ def init_session_state():
         "connected": False,
         "teams_list": [],
         "groups_list": [],
+        "users_list": [],
         "channels_map": {},
         "selected_team": None,
         "selected_channels": [],
@@ -165,6 +166,7 @@ def render_setup_page():
    - `Channel.ReadBasic.All`
    - `ChannelMessage.Read.All`
    - `Chat.Read.All`
+   - `User.Read.All`
 4. Click "Grant admin consent"
 
 **Step 3: Create a Client Secret**
@@ -267,18 +269,44 @@ def render_group_chat_selector():
     client = st.session_state.teams_client
     vs = st.session_state.vector_store
 
-    if not st.session_state.groups_list:
-        with st.spinner("Loading group chats..."):
+    if not st.session_state.users_list:
+        with st.spinner("Loading users..."):
             try:
-                chats = client.get_group_chats()
-                st.session_state.groups_list = chats
+                users = client.get_users()
+                st.session_state.users_list = users
             except Exception as e:
-                st.error(f"Failed to load group chats: {str(e)}")
+                st.error(f"Failed to load users: {str(e)}")
                 return
+
+    users = st.session_state.users_list
+    if not users:
+        st.info("No users found. Make sure the app has User.Read.All permission.")
+        return
+
+    user_options = {f"{u['name']} ({u['email']})" if u['email'] else u['name']: u['id'] for u in users}
+    selected_user_labels = st.multiselect(
+        "Select users to load group chats from",
+        options=list(user_options.keys()),
+    )
+
+    if selected_user_labels:
+        selected_user_ids = [user_options[label] for label in selected_user_labels]
+
+        if st.button("Load Group Chats"):
+            with st.spinner(f"Loading group chats for {len(selected_user_ids)} user(s)..."):
+                try:
+                    chats = client.get_group_chats(user_ids=selected_user_ids)
+                    st.session_state.groups_list = chats
+                except Exception as e:
+                    st.error(f"Failed to load group chats: {str(e)}")
+                    return
 
     chats = st.session_state.groups_list
     if not chats:
-        st.info("No group chats found. Make sure the app has Chat.Read.All permission.")
+        if selected_user_labels:
+            st.info("No group chats found for the selected users. Click 'Load Group Chats' to search.")
+        else:
+            st.info("Select one or more users above, then click 'Load Group Chats'.")
         return
 
     st.write(f"Found {len(chats)} group chat(s).")
@@ -494,6 +522,7 @@ def main():
                 st.session_state.teams_client = None
                 st.session_state.teams_list = []
                 st.session_state.groups_list = []
+                st.session_state.users_list = []
                 st.session_state.channels_map = {}
                 st.rerun()
 

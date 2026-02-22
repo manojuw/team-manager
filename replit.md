@@ -30,6 +30,7 @@ A Streamlit application that connects to Microsoft Teams via the Microsoft Graph
 - `Channel.ReadBasic.All`
 - `ChannelMessage.Read.All`
 - `Chat.Read.All` (for group chats access)
+- `User.Read.All` (for listing users to discover group chats)
 
 ## Dependencies
 - streamlit, msal, psycopg2-binary, requests, tenacity, pandas, openai, fastembed

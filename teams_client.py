@@ -195,41 +195,56 @@ class TeamsClient:
 
         return results
 
-    def get_group_chats(self) -> list:
-        url = f"{GRAPH_API_BASE}/chats"
+    def get_users(self) -> list:
+        url = f"{GRAPH_API_BASE}/users"
         params = {
-            "$filter": "chatType eq 'group'",
-            "$select": "id,topic,chatType,createdDateTime,lastUpdatedDateTime",
-            "$top": 50,
+            "$select": "id,displayName,mail,userPrincipalName",
+            "$top": 100,
         }
-        try:
-            params_with_expand = dict(params)
-            params_with_expand["$expand"] = "members"
-            chats = self._get_all_pages(url, params=params_with_expand, max_pages=20)
-        except Exception:
-            logger.info("Fetching chats with $expand=members failed, retrying without expansion")
-            chats = self._get_all_pages(url, params=params, max_pages=20)
+        users = self._get_all_pages(url, params=params, max_pages=10)
+        return [
+            {
+                "id": u["id"],
+                "name": u.get("displayName", "Unknown"),
+                "email": u.get("mail") or u.get("userPrincipalName", ""),
+            }
+            for u in users
+            if u.get("displayName")
+        ]
+
+    def get_group_chats(self, user_ids: list = None) -> list:
+        all_chats = {}
+        for user_id in (user_ids or []):
+            url = f"{GRAPH_API_BASE}/users/{user_id}/chats"
+            params = {
+                "$filter": "chatType eq 'group'",
+                "$select": "id,topic,chatType,createdDateTime,lastUpdatedDateTime",
+                "$top": 50,
+            }
+            try:
+                chats = self._get_all_pages(url, params=params, max_pages=5)
+            except Exception as e:
+                logger.warning(f"Failed to fetch chats for user {user_id}: {e}")
+                continue
+
+            for chat in chats:
+                chat_id = chat.get("id", "")
+                if chat_id and chat_id not in all_chats:
+                    all_chats[chat_id] = chat
 
         results = []
-        for chat in chats:
-            members = chat.get("members", [])
-            member_names = [
-                m.get("displayName", "Unknown")
-                for m in members
-                if m.get("displayName")
-            ]
-
-            if not member_names:
-                try:
-                    members_url = f"{GRAPH_API_BASE}/chats/{chat['id']}/members"
-                    fetched = self._get_all_pages(members_url, max_pages=1)
-                    member_names = [
-                        m.get("displayName", "Unknown")
-                        for m in fetched
-                        if m.get("displayName")
-                    ]
-                except Exception:
-                    pass
+        for chat_id, chat in all_chats.items():
+            member_names = []
+            try:
+                members_url = f"{GRAPH_API_BASE}/chats/{chat_id}/members"
+                fetched = self._get_all_pages(members_url, max_pages=1)
+                member_names = [
+                    m.get("displayName", "Unknown")
+                    for m in fetched
+                    if m.get("displayName")
+                ]
+            except Exception:
+                pass
 
             topic = chat.get("topic", "")
             display_name = topic if topic else ", ".join(member_names[:5])
@@ -237,7 +252,7 @@ class TeamsClient:
                 display_name += f" +{len(member_names) - 5} more"
 
             results.append({
-                "id": chat["id"],
+                "id": chat_id,
                 "name": display_name or "Unnamed Chat",
                 "topic": topic,
                 "member_count": len(member_names),
