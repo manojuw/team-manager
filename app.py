@@ -18,7 +18,7 @@ st.set_page_config(
 def init_session_state():
     defaults = {
         "teams_client": None,
-        "vector_store": VectorStore(),
+        "vector_store": None,
         "connected": False,
         "teams_list": [],
         "channels_map": {},
@@ -32,6 +32,12 @@ def init_session_state():
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
+
+    if st.session_state.vector_store is None:
+        try:
+            st.session_state.vector_store = VectorStore()
+        except Exception as e:
+            st.error(f"Failed to initialize vector store: {e}")
 
 
 def auto_connect_from_secrets():
