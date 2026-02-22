@@ -4,43 +4,32 @@ import logging
 import psycopg2
 import psycopg2.extras
 from datetime import datetime, timezone
-from openai import OpenAI
+from fastembed import TextEmbedding
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_MODEL = "text-embedding-3-small"
-EMBEDDING_DIM = 1536
+EMBEDDING_DIM = 384
 
-AI_INTEGRATIONS_OPENAI_API_KEY = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
-AI_INTEGRATIONS_OPENAI_BASE_URL = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
+_embedding_model = None
 
-openai_client = OpenAI(
-    api_key=AI_INTEGRATIONS_OPENAI_API_KEY,
-    base_url=AI_INTEGRATIONS_OPENAI_BASE_URL,
-)
+
+def _get_model():
+    global _embedding_model
+    if _embedding_model is None:
+        _embedding_model = TextEmbedding()
+    return _embedding_model
 
 
 def get_embedding(text: str) -> list:
-    text = text[:8000]
-    response = openai_client.embeddings.create(
-        model=EMBEDDING_MODEL,
-        input=text,
-    )
-    return response.data[0].embedding
+    model = _get_model()
+    embeddings = list(model.embed([text]))
+    return embeddings[0].tolist()
 
 
 def get_embeddings_batch(texts: list) -> list:
-    texts = [t[:8000] for t in texts]
-    batch_size = 100
-    all_embeddings = []
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        response = openai_client.embeddings.create(
-            model=EMBEDDING_MODEL,
-            input=batch,
-        )
-        all_embeddings.extend([d.embedding for d in response.data])
-    return all_embeddings
+    model = _get_model()
+    embeddings = list(model.embed(texts))
+    return [e.tolist() for e in embeddings]
 
 
 class VectorStore:

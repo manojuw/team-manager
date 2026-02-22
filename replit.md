@@ -7,17 +7,17 @@ A Streamlit application that connects to Microsoft Teams via the Microsoft Graph
 - **Frontend**: Streamlit (port 5000)
 - **Teams Integration**: Microsoft Graph API via MSAL (application-level auth)
 - **Vector Database**: PostgreSQL + pgvector (cloud-hosted, Replit built-in database)
-- **Embeddings**: OpenAI text-embedding-3-small (1536 dimensions) via Replit AI Integrations
+- **Embeddings**: fastembed BAAI/bge-small-en-v1.5 (384 dimensions, runs locally, no API key needed)
 - **AI**: OpenAI via Replit AI Integrations (GPT-5.2 for Q&A)
 
 ## Key Files
 - `app.py` — Main Streamlit application with UI tabs (Channel Selector, Knowledge Base, Ask Questions)
 - `teams_client.py` — Microsoft Graph API client for fetching teams, channels, and messages
-- `vector_store.py` — PostgreSQL + pgvector wrapper for storing, searching, and managing indexed messages with OpenAI embeddings
+- `vector_store.py` — PostgreSQL + pgvector wrapper for storing, searching, and managing indexed messages with fastembed local embeddings
 - `ai_assistant.py` — OpenAI-powered Q&A and summarization using Replit AI Integrations
 
 ## Database Schema
-- `teams_messages` — Stores message content with vector embeddings (id, content, embedding vector(1536), sender, team, channel, etc.)
+- `teams_messages` — Stores message content with vector embeddings (id, content, embedding vector(384), sender, team, channel, etc.)
 - `sync_metadata` — Tracks last sync time per team/channel pair
 
 ## Configuration
@@ -32,9 +32,10 @@ A Streamlit application that connects to Microsoft Teams via the Microsoft Graph
 - `Group.Read.All`
 
 ## Dependencies
-- streamlit, msal, psycopg2-binary, requests, tenacity, pandas, openai
+- streamlit, msal, psycopg2-binary, requests, tenacity, pandas, openai, fastembed
 
 ## Recent Changes
-- 2026-02-22: Migrated vector store from ChromaDB (local) to PostgreSQL + pgvector (cloud) with OpenAI embeddings
+- 2026-02-22: Switched embeddings from OpenAI API to fastembed (local, no API key needed)
+- 2026-02-22: Migrated vector store from ChromaDB (local) to PostgreSQL + pgvector (cloud)
 - 2026-02-22: Fixed thread reply syncing — replies to older threads now captured properly
 - 2026-02-22: Initial build with Teams connection, channel sync, vector indexing, and AI Q&A
