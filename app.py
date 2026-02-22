@@ -119,12 +119,12 @@ def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: st
         raise e
 
 
-def sync_group(group_id: str, group_name: str):
+def sync_group_chat(chat_id: str, chat_name: str):
     client = st.session_state.teams_client
     vs = st.session_state.vector_store
 
-    sync_key = f"group-{group_id}"
-    last_sync_str = vs.get_last_sync(sync_key, "conversations")
+    sync_key = f"chat-{chat_id}"
+    last_sync_str = vs.get_last_sync(sync_key, "group_chat")
     since = None
     if last_sync_str != "Never":
         try:
@@ -133,9 +133,9 @@ def sync_group(group_id: str, group_name: str):
             since = None
 
     try:
-        messages = client.get_group_threads(group_id, since=since)
-        added = vs.add_messages(messages, group_name, "Group Conversations")
-        vs.update_sync_time(sync_key, "conversations")
+        messages = client.get_chat_messages(chat_id, since=since)
+        added = vs.add_messages(messages, chat_name, "Group Chat")
+        vs.update_sync_time(sync_key, "group_chat")
         return added, len(messages)
     except Exception as e:
         raise e
@@ -164,7 +164,7 @@ def render_setup_page():
    - `Team.ReadBasic.All`
    - `Channel.ReadBasic.All`
    - `ChannelMessage.Read.All`
-   - `Group.Read.All`
+   - `Chat.Read.All`
 4. Click "Grant admin consent"
 
 **Step 3: Create a Client Secret**
@@ -261,78 +261,67 @@ def render_channel_selector():
             st.warning("No channels found in this team.")
 
 
-def render_group_selector():
-    st.header("Select Groups to Sync")
+def render_group_chat_selector():
+    st.header("Select Group Chats to Sync")
 
     client = st.session_state.teams_client
     vs = st.session_state.vector_store
 
     if not st.session_state.groups_list:
-        with st.spinner("Loading groups..."):
+        with st.spinner("Loading group chats..."):
             try:
-                groups = client.get_groups()
-                st.session_state.groups_list = groups
+                chats = client.get_group_chats()
+                st.session_state.groups_list = chats
             except Exception as e:
-                st.error(f"Failed to load groups: {str(e)}")
+                st.error(f"Failed to load group chats: {str(e)}")
                 return
 
-    groups = st.session_state.groups_list
-    if not groups:
-        st.info("No Microsoft 365 Groups found. Check your permissions.")
+    chats = st.session_state.groups_list
+    if not chats:
+        st.info("No group chats found. Make sure the app has Chat.Read.All permission.")
         return
 
-    groups_only = [g for g in groups if not g.get("has_team")]
-    groups_with_teams = [g for g in groups if g.get("has_team")]
+    st.write(f"Found {len(chats)} group chat(s).")
 
-    if groups_only:
-        st.subheader(f"Groups ({len(groups_only)})")
-        selected_groups = []
-        for g in groups_only:
-            sync_key = f"group-{g['id']}"
-            last_sync = vs.get_last_sync(sync_key, "conversations")
-            label = g["name"]
-            if g.get("description"):
-                label += f" — {g['description']}"
+    selected_chats = []
+    for chat in chats:
+        sync_key = f"chat-{chat['id']}"
+        last_sync = vs.get_last_sync(sync_key, "group_chat")
+        label = chat["name"]
+        members_str = f"{chat['member_count']} members"
 
-            col1, col2, col3 = st.columns([3, 2, 1])
-            with col1:
-                if st.checkbox(label, key=f"grp_{g['id']}"):
-                    selected_groups.append(g)
-            with col2:
-                st.caption(f"Last sync: {last_sync}")
-            with col3:
-                if st.button("Sync", key=f"sync_grp_{g['id']}"):
-                    with st.spinner(f"Syncing {g['name']}..."):
-                        try:
-                            added, total = sync_group(g["id"], g["name"])
-                            st.success(
-                                f"Synced {g['name']}: {added} new items added "
-                                f"({total} posts fetched)"
-                            )
-                        except Exception as e:
-                            st.error(f"Sync failed for {g['name']}: {str(e)}")
+        col1, col2, col3 = st.columns([3, 2, 1])
+        with col1:
+            if st.checkbox(label, key=f"gc_{chat['id']}"):
+                selected_chats.append(chat)
+            st.caption(members_str)
+        with col2:
+            st.caption(f"Last sync: {last_sync}")
+        with col3:
+            if st.button("Sync", key=f"sync_gc_{chat['id']}"):
+                with st.spinner(f"Syncing {chat['name']}..."):
+                    try:
+                        added, total = sync_group_chat(chat["id"], chat["name"])
+                        st.success(
+                            f"Synced: {added} new messages added "
+                            f"({total} fetched)"
+                        )
+                    except Exception as e:
+                        st.error(f"Sync failed: {str(e)}")
 
-        if selected_groups:
-            if st.button("Sync All Selected Groups", type="primary"):
-                progress = st.progress(0)
-                total_added = 0
-                for i, g in enumerate(selected_groups):
-                    with st.spinner(f"Syncing {g['name']}..."):
-                        try:
-                            added, _ = sync_group(g["id"], g["name"])
-                            total_added += added
-                        except Exception as e:
-                            st.error(f"Failed: {g['name']}: {str(e)}")
-                    progress.progress((i + 1) / len(selected_groups))
-                st.success(f"Sync complete! Added {total_added} new messages total.")
-    else:
-        st.info("No standalone Groups found (all groups are associated with Teams).")
-
-    if groups_with_teams:
-        with st.expander(f"Groups with Teams ({len(groups_with_teams)})"):
-            st.caption("These groups are linked to Teams. You can sync their channels from the Channel Selector tab.")
-            for g in groups_with_teams:
-                st.write(f"- {g['name']}")
+    if selected_chats:
+        if st.button("Sync All Selected Group Chats", type="primary"):
+            progress = st.progress(0)
+            total_added = 0
+            for i, chat in enumerate(selected_chats):
+                with st.spinner(f"Syncing {chat['name']}..."):
+                    try:
+                        added, _ = sync_group_chat(chat["id"], chat["name"])
+                        total_added += added
+                    except Exception as e:
+                        st.error(f"Failed: {chat['name']}: {str(e)}")
+                progress.progress((i + 1) / len(selected_chats))
+            st.success(f"Sync complete! Added {total_added} new messages total.")
 
 
 def render_knowledge_base():
@@ -468,7 +457,7 @@ def main():
     else:
         tab1, tab2, tab3, tab4 = st.tabs([
             "Channel Selector",
-            "Group Selector",
+            "Group Chats",
             "Knowledge Base",
             "Ask Questions",
         ])
@@ -476,7 +465,7 @@ def main():
         with tab1:
             render_channel_selector()
         with tab2:
-            render_group_selector()
+            render_group_chat_selector()
         with tab3:
             render_knowledge_base()
         with tab4:
