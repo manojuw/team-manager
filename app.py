@@ -1,9 +1,12 @@
+import logging
 import streamlit as st
 import os
 from datetime import datetime
 from teams_client import TeamsClient
 from vector_store import VectorStore
 from ai_assistant import ask_question, summarize_channel
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 
 st.set_page_config(
     page_title="Teams Knowledge Base",
@@ -102,7 +105,9 @@ def sync_channel(team_id: str, team_name: str, channel_id: str, channel_name: st
         messages = client.get_channel_messages(team_id, channel_id, since=since)
         added = vs.add_messages(messages, team_name, channel_name)
         vs.update_sync_time(team_id, channel_id)
-        return added, len(messages)
+        replies_count = sum(1 for m in messages if m.get("message_type") == "reply")
+        posts_count = len(messages) - replies_count
+        return added, len(messages), posts_count, replies_count
     except Exception as e:
         raise e
 
@@ -194,11 +199,14 @@ def render_channel_selector():
                     if st.button("Sync", key=f"sync_{ch['id']}"):
                         with st.spinner(f"Syncing {ch['name']}..."):
                             try:
-                                added, total = sync_channel(
+                                added, total, posts, replies = sync_channel(
                                     team_id, selected_team_name,
                                     ch["id"], ch["name"]
                                 )
-                                st.success(f"Synced {ch['name']}: {added} new messages (from {total} fetched)")
+                                st.success(
+                                    f"Synced {ch['name']}: {added} new items added "
+                                    f"({posts} posts + {replies} replies fetched)"
+                                )
                             except Exception as e:
                                 st.error(f"Sync failed for {ch['name']}: {str(e)}")
 
@@ -211,7 +219,7 @@ def render_channel_selector():
                     for i, ch in enumerate(selected):
                         with st.spinner(f"Syncing {ch['name']}..."):
                             try:
-                                added, _ = sync_channel(
+                                added, total, posts, replies = sync_channel(
                                     team_id, selected_team_name,
                                     ch["id"], ch["name"]
                                 )

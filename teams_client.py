@@ -1,7 +1,10 @@
+import logging
 import msal
 import requests
 import time
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
@@ -89,17 +92,23 @@ class TeamsClient:
     ) -> list:
         url = f"{GRAPH_API_BASE}/teams/{team_id}/channels/{channel_id}/messages"
         params = {"$top": top}
-        messages = self._get_all_pages(url, params=params, max_pages=10)
+        messages = self._get_all_pages(url, params=params, max_pages=20)
+
+        logger.info(
+            f"Fetched {len(messages)} top-level messages from API (since={since})"
+        )
 
         results = []
+        total_replies_fetched = 0
         for msg in messages:
             created = msg.get("createdDateTime", "")
+            msg_id = msg.get("id", "")
 
             is_new_message = True
             if since and created:
                 try:
                     msg_time = datetime.fromisoformat(created.replace("Z", "+00:00"))
-                    if msg_time <= since:
+                    if msg_time < since:
                         is_new_message = False
                 except (ValueError, TypeError):
                     pass
@@ -129,7 +138,7 @@ class TeamsClient:
 
                 if content.strip():
                     results.append({
-                        "id": msg.get("id", ""),
+                        "id": msg_id,
                         "content": content,
                         "sender": sender_name,
                         "created_at": created,
@@ -137,18 +146,15 @@ class TeamsClient:
                         "message_type": msg.get("messageType", "message"),
                     })
 
-            replies = self._get_message_replies(team_id, channel_id, msg.get("id", ""))
+            replies = self._get_message_replies(team_id, channel_id, msg_id)
+            total_replies_fetched += len(replies)
             for reply in replies:
-                if since and reply.get("created_at"):
-                    try:
-                        reply_time = datetime.fromisoformat(
-                            reply["created_at"].replace("Z", "+00:00")
-                        )
-                        if reply_time <= since:
-                            continue
-                    except (ValueError, TypeError):
-                        pass
                 results.append(reply)
+
+        logger.info(
+            f"Sync results: {len(results)} total items "
+            f"({len(messages)} top-level, {total_replies_fetched} replies fetched)"
+        )
 
         return results
 
