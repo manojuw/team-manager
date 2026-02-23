@@ -21,6 +21,7 @@ cd /home/runner/workspace
 
 echo "[START] Starting Next.js frontend on port 5001..."
 cd /home/runner/workspace/frontend
+export NEXT_PUBLIC_SITE_URL=https://b31b57a1-419f-4167-a41c-da7c93c04281-00-1fzcly9rvrykj.janeway.replit.dev
 npx next dev --hostname 0.0.0.0 --port 5001 &
 cd /home/runner/workspace
 
