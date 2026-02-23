@@ -1,9 +1,10 @@
 #!/bin/bash
 
 cd /home/runner/workspace
+export PATH="/home/runner/workspace/bin:$PATH"
 
 echo "[START] Stopping any existing services..."
-for pid in $(ps aux | grep -E "ts-node.*src/main|uvicorn.*8001|next dev.*5001" | grep -v grep | awk '{print $2}'); do
+for pid in $(ps aux | grep -E "ts-node.*src/main|uvicorn.*8001|next dev.*5001|next-server" | grep -v grep | awk '{print $2}'); do
   kill -9 "$pid" 2>/dev/null || true
 done
 sleep 2

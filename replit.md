@@ -101,6 +101,7 @@ Follows SOLID principles with clean separation of concerns:
 - 2026-02-23: Replaced teams_messages with generic semantic_data table (source_type, segment_type, source_identifier JSONB)
 - 2026-02-23: Rebuilt management API with NestJS, TypeORM, repository pattern, SOLID principles
 - 2026-02-23: Added multi-tenancy with JWT auth, signup/login, tenant-scoped data isolation
+- 2026-02-23: Removed Streamlit dependency entirely; app.py is now a plain Python launcher for start.sh
 - 2026-02-23: Replaced Streamlit frontend with Next.js + shadcn/ui
 - 2026-02-22: Added multi-project support with pluggable data source architecture
 - 2026-02-22: Migrated vector store from ChromaDB to PostgreSQL + pgvector
