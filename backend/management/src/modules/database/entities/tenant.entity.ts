@@ -2,7 +2,7 @@ import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, OneToMany } f
 import { User } from './user.entity';
 import { Project } from './project.entity';
 
-@Entity('tenants')
+@Entity('tenant')
 export class Tenant {
   @PrimaryGeneratedColumn('uuid')
   id: string;

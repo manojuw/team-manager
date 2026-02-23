@@ -1,8 +1,8 @@
 import { Entity, PrimaryColumn, Column, CreateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
 import { Project } from './project.entity';
 
-@Entity('project_data_sources')
-export class ProjectDataSource {
+@Entity('data_source')
+export class DataSource {
   @PrimaryColumn({ type: 'text' })
   id: string;
 
@@ -14,6 +14,12 @@ export class ProjectDataSource {
 
   @Column({ type: 'jsonb', nullable: true })
   config: Record<string, any>;
+
+  @Column({ type: 'jsonb', nullable: true, name: 'encrypted_config' })
+  encrypted_config: Record<string, any>;
+
+  @Column({ type: 'timestamptz', nullable: true, name: 'secrets_updated_at' })
+  secrets_updated_at: Date;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   created_at: Date;

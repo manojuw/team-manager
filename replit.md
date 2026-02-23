@@ -19,16 +19,17 @@ Follows SOLID principles with clean separation of concerns:
 - **Auth**: JWT strategy with Passport, bcrypt password hashing, JwtAuthGuard
 - **Validation**: DTOs with class-validator, global ValidationPipe
 - **Tenant Isolation**: Every query scoped by tenant_id via repository pattern
+- **Secret Encryption**: AES-256-GCM encryption for sensitive config fields (EncryptionService)
 
 ### Key Backend Files
 - `backend/management/src/main.ts` — NestJS entry point (port 3001)
 - `backend/management/src/app.module.ts` — Root module wiring all feature modules
 - `backend/management/src/modules/auth/` — Auth module (signup, login, JWT strategy)
 - `backend/management/src/modules/projects/` — Projects CRUD with tenant scoping
-- `backend/management/src/modules/datasources/` — Data sources management
+- `backend/management/src/modules/datasources/` — Data sources management with encrypted secrets
 - `backend/management/src/modules/sync/` — Sync history and status
-- `backend/management/src/modules/database/entities/` — TypeORM entities (Tenant, User, Project, etc.)
-- `backend/management/src/common/` — Shared guards, decorators, interfaces
+- `backend/management/src/modules/database/entities/` — TypeORM entities (Tenant, User, Project, DataSource, SemanticData, SyncMetadata, SyncHistory)
+- `backend/management/src/common/services/encryption.service.ts` — AES-256-GCM encryption/decryption for config secrets
 
 ### Key Frontend Files
 - `frontend/src/app/` — Next.js pages (login, signup, dashboard tabs)
@@ -38,23 +39,36 @@ Follows SOLID principles with clean separation of concerns:
 ### AI Service Files
 - `backend/ai-service/main.py` — FastAPI endpoints for Teams sync, search, Q&A
 - `backend/ai-service/teams_client.py` — Microsoft Graph API client
-- `backend/ai-service/vector_ops.py` — pgvector operations
+- `backend/ai-service/vector_ops.py` — pgvector operations with generic semantic_data table
 - `backend/ai-service/scheduler.py` — Background sync scheduler
+- `backend/ai-service/encryption.py` — Python decryption utility for encrypted configs
 
-## Database Schema
-- `tenants` — Multi-tenant organizations (id uuid, name, created_at)
-- `users` — User accounts with tenant association (id uuid, email, password_hash, tenant_id)
-- `projects` — Project definitions with tenant isolation (id, name, description, tenant_id)
-- `project_data_sources` — Data source configs per project (id, project_id, source_type, config JSONB, tenant_id)
-- `teams_messages` — Message content with vector embeddings (id, content, embedding vector(384), tenant_id)
-- `sync_metadata` — Last sync time tracking per channel/project
-- `sync_history` — Sync operation history with status/counts
+## Database Schema (all table names are singular)
+- `tenant` — Multi-tenant organizations (id uuid, name, created_at)
+- `user` — User accounts with tenant association (id uuid, email, password_hash, tenant_id)
+- `project` — Project definitions with tenant isolation (id, name, description, tenant_id)
+- `data_source` — Data source configs per project (id, project_id, source_type, config JSONB masked, encrypted_config JSONB encrypted, secrets_updated_at, sync_interval_minutes, sync_enabled, tenant_id)
+- `semantic_data` — Generic indexed content from any source (id, tenant_id, project_id, data_source_id, source_type, segment_type, source_identifier JSONB, content, embedding vector(384), sender, message_type, metadata JSONB)
+- `sync_metadata` — Generic sync tracking for any source/segment (id, tenant_id, project_id, data_source_id, source_type, segment_type, source_identifier JSONB, last_sync_at, metadata JSONB)
+- `sync_history` — Sync operation history (id uuid, tenant_id, project_id, data_source_id, source_type, segment_type, status, records_added, records_fetched, error_message)
+
+### Source Types & Segments
+- **microsoft_teams**: team_channel, group_chat, individual_chat
+- Source identifier is JSONB — flexible for any source: `{team_id, team_name, channel_id, channel_name}` or `{chat_id, chat_name}` or `{email, thread_id}` etc.
+
+### Secret Encryption
+- Sensitive config fields (client_secret, api_key, password, token, secret) are encrypted with AES-256-GCM
+- Key derived from SESSION_SECRET via PBKDF2 (100,000 iterations, SHA-256)
+- Encrypted values stored in `data_source.encrypted_config` as `{__encrypted: true, value: "base64..."}`
+- Plain `data_source.config` stores masked values only (••••••••)
+- `secrets_updated_at` tracks when secrets were last created/updated
+- Both NestJS (encryption.service.ts) and Python AI service (encryption.py) can encrypt/decrypt
 
 ## Configuration
 - Proxy routes: `/api/management/*` → port 3001, `/api/ai/*` → port 8001, all else → port 5001 (Next.js)
 - Startup: Modified streamlit wrapper starts all services then execs into proxy on port 5000
 - JWT secret: SESSION_SECRET environment variable (required)
-- Azure AD credentials stored per data source in project_data_sources.config JSONB
+- Azure AD credentials stored encrypted per data source in data_source.encrypted_config JSONB
 
 ## Required Azure AD Permissions
 - `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`
@@ -62,10 +76,14 @@ Follows SOLID principles with clean separation of concerns:
 
 ## Dependencies
 - **Backend (NestJS)**: @nestjs/core, @nestjs/typeorm, typeorm, @nestjs/jwt, passport-jwt, bcryptjs, class-validator, pg
-- **AI Service (Python)**: fastapi, uvicorn, psycopg2-binary, msal, fastembed, openai
+- **AI Service (Python)**: fastapi, uvicorn, psycopg2-binary, msal, fastembed, openai, cryptography
 - **Frontend**: next, react, @radix-ui/*, tailwindcss, class-variance-authority
 
 ## Recent Changes
+- 2026-02-23: Renamed all tables to singular (tenant, user, project, data_source, semantic_data, sync_metadata, sync_history)
+- 2026-02-23: Added AES-256-GCM encryption for data source secrets with secrets_updated_at tracking
+- 2026-02-23: Replaced teams_messages with generic semantic_data table (source_type, segment_type, source_identifier JSONB)
+- 2026-02-23: Restructured sync_metadata to be source-agnostic with JSONB source_identifier
 - 2026-02-23: Rebuilt management API with NestJS, TypeORM, repository pattern, SOLID principles
 - 2026-02-23: Added multi-tenancy with JWT auth, signup/login, tenant-scoped data isolation
 - 2026-02-23: Replaced Streamlit frontend with Next.js + shadcn/ui
@@ -76,3 +94,6 @@ Follows SOLID principles with clean separation of concerns:
 - Prefers NestJS with TypeORM and repository pattern for backend
 - Wants SOLID principles and service isolation
 - Prefers clean, modern UI with shadcn/ui
+- Table names must be singular
+- All secrets must be stored encrypted with update timestamps
+- No frontend changes unless explicitly specified

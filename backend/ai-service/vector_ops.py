@@ -1,6 +1,7 @@
 import os
 import hashlib
 import logging
+import json
 import psycopg2
 from datetime import datetime, timezone
 from fastembed import TextEmbedding
@@ -40,7 +41,9 @@ class VectorOps:
         raw = f"{tenant_id}-{project_id}-{message.get('id', '')}-{message.get('created_at', '')}-{message.get('sender', '')}"
         return hashlib.md5(raw.encode()).hexdigest()
 
-    def add_messages(self, messages: list, team_name: str, channel_name: str, project_id: str, tenant_id: str) -> int:
+    def add_messages(self, messages: list, source_type: str, segment_type: str,
+                     source_identifier: dict, project_id: str, tenant_id: str,
+                     data_source_id: str = None) -> int:
         if not messages:
             return 0
         added = 0
@@ -54,7 +57,7 @@ class VectorOps:
                 with conn.cursor() as cur:
                     for msg in batch:
                         doc_id = self._make_id(msg, project_id, tenant_id)
-                        cur.execute("SELECT 1 FROM teams_messages WHERE id = %s", (doc_id,))
+                        cur.execute("SELECT 1 FROM semantic_data WHERE id = %s", (doc_id,))
                         if cur.fetchone():
                             continue
                         doc_text = f"[{msg.get('created_at', 'Unknown time')}] {msg['sender']}: {msg['content']}"
@@ -70,20 +73,24 @@ class VectorOps:
                 logger.error(f"Embedding generation failed: {e}")
                 continue
 
+            source_id_json = json.dumps(source_identifier)
+
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
                     for (doc_id, msg, doc_text), embedding in zip(new_msgs, embeddings):
                         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
                         cur.execute(
-                            """INSERT INTO teams_messages
-                               (id, tenant_id, project_id, content, embedding, sender, created_at, team, channel,
+                            """INSERT INTO semantic_data
+                               (id, tenant_id, project_id, data_source_id, source_type, segment_type,
+                                source_identifier, content, embedding, sender, created_at,
                                 message_type, message_id, parent_message_id)
-                               VALUES (%s, %s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s, %s)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::vector, %s, %s, %s, %s, %s)
                                ON CONFLICT (id) DO NOTHING""",
                             (
-                                doc_id, tenant_id, project_id, doc_text, embedding_str,
+                                doc_id, tenant_id, project_id, data_source_id,
+                                source_type, segment_type, source_id_json,
+                                doc_text, embedding_str,
                                 msg.get("sender", "Unknown"), msg.get("created_at", ""),
-                                team_name, channel_name,
                                 msg.get("message_type", "message"), msg.get("id", ""),
                                 msg.get("parent_message_id"),
                             ),
@@ -91,7 +98,7 @@ class VectorOps:
                         added += 1
                 conn.commit()
 
-        logger.info(f"Added {added} new messages (project={project_id}, tenant={tenant_id})")
+        logger.info(f"Added {added} new records (project={project_id}, tenant={tenant_id})")
         return added
 
     def search(self, query: str, n_results: int = 20, filters: dict = None, project_id: str = None, tenant_id: str = None) -> list:
@@ -112,11 +119,17 @@ class VectorOps:
             where_clauses.append("project_id = %s")
             filter_params.append(project_id)
         if filters:
+            if filters.get("source_type"):
+                where_clauses.append("source_type = %s")
+                filter_params.append(filters["source_type"])
+            if filters.get("segment_type"):
+                where_clauses.append("segment_type = %s")
+                filter_params.append(filters["segment_type"])
             if filters.get("team"):
-                where_clauses.append("team = %s")
+                where_clauses.append("source_identifier->>'team_name' = %s")
                 filter_params.append(filters["team"])
             if filters.get("channel"):
-                where_clauses.append("channel = %s")
+                where_clauses.append("source_identifier->>'channel_name' = %s")
                 filter_params.append(filters["channel"])
             if filters.get("sender"):
                 where_clauses.append("sender = %s")
@@ -125,10 +138,10 @@ class VectorOps:
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
         sql = f"""
-            SELECT content, sender, created_at, team, channel, message_type,
-                   message_id, parent_message_id,
+            SELECT content, sender, created_at, source_type, segment_type,
+                   source_identifier, message_type, message_id, parent_message_id,
                    1 - (embedding <=> %s::vector) AS relevance
-            FROM teams_messages
+            FROM semantic_data
             {where_sql}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
@@ -141,60 +154,76 @@ class VectorOps:
                 with conn.cursor() as cur:
                     cur.execute(sql, params)
                     for row in cur.fetchall():
+                        source_id = row[5] if isinstance(row[5], dict) else json.loads(row[5]) if row[5] else {}
                         results.append({
                             "content": row[0],
                             "metadata": {
                                 "sender": row[1], "created_at": row[2],
-                                "team": row[3], "channel": row[4],
-                                "message_type": row[5], "message_id": row[6],
-                                "parent_message_id": row[7],
+                                "source_type": row[3], "segment_type": row[4],
+                                "source_identifier": source_id,
+                                "team": source_id.get("team_name", ""),
+                                "channel": source_id.get("channel_name", ""),
+                                "message_type": row[6], "message_id": row[7],
+                                "parent_message_id": row[8],
                             },
-                            "relevance": float(row[8]) if row[8] else 0,
+                            "relevance": float(row[9]) if row[9] else 0,
                         })
         except Exception as e:
             logger.error(f"Search failed: {e}")
         return results
 
     def get_stats(self, project_id: str, tenant_id: str) -> dict:
-        stats = {"total_messages": 0, "teams": [], "channels": []}
+        stats = {"total_records": 0, "source_types": [], "segment_types": [], "teams": [], "channels": []}
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM teams_messages WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["total_messages"] = cur.fetchone()[0]
-                    cur.execute("SELECT DISTINCT team FROM teams_messages WHERE team IS NOT NULL AND project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["teams"] = [row[0] for row in cur.fetchall()]
-                    cur.execute("SELECT DISTINCT channel FROM teams_messages WHERE channel IS NOT NULL AND project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["channels"] = [row[0] for row in cur.fetchall()]
+                    cur.execute("SELECT COUNT(*) FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
+                    stats["total_records"] = cur.fetchone()[0]
+                    cur.execute("SELECT DISTINCT source_type FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
+                    stats["source_types"] = [row[0] for row in cur.fetchall()]
+                    cur.execute("SELECT DISTINCT segment_type FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
+                    stats["segment_types"] = [row[0] for row in cur.fetchall()]
+                    cur.execute("SELECT DISTINCT source_identifier->>'team_name' FROM semantic_data WHERE source_identifier->>'team_name' IS NOT NULL AND project_id = %s AND tenant_id = %s", (project_id, tenant_id))
+                    stats["teams"] = [row[0] for row in cur.fetchall() if row[0]]
+                    cur.execute("SELECT DISTINCT source_identifier->>'channel_name' FROM semantic_data WHERE source_identifier->>'channel_name' IS NOT NULL AND project_id = %s AND tenant_id = %s", (project_id, tenant_id))
+                    stats["channels"] = [row[0] for row in cur.fetchall() if row[0]]
         except Exception as e:
             logger.error(f"Stats query failed: {e}")
         return stats
 
-    def update_sync_time(self, team_id: str, channel_id: str, project_id: str, tenant_id: str):
-        sync_id = f"sync-{tenant_id}-{project_id}-{team_id}-{channel_id}"
+    def update_sync_time(self, source_type: str, segment_type: str,
+                         source_identifier: dict, project_id: str, tenant_id: str,
+                         data_source_id: str = None):
+        source_id_json = json.dumps(source_identifier, sort_keys=True)
+        sync_id = f"sync-{tenant_id}-{project_id}-{hashlib.md5(source_id_json.encode()).hexdigest()}"
         now = datetime.now(timezone.utc).isoformat()
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """INSERT INTO sync_metadata (id, tenant_id, project_id, team_id, channel_id, last_sync, updated_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                           ON CONFLICT (id) DO UPDATE SET last_sync = %s, updated_at = NOW()""",
-                        (sync_id, tenant_id, project_id, team_id, channel_id, now, now),
+                        """INSERT INTO sync_metadata
+                           (id, tenant_id, project_id, data_source_id, source_type, segment_type,
+                            source_identifier, last_sync_at, updated_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, NOW())
+                           ON CONFLICT (id) DO UPDATE SET last_sync_at = %s, updated_at = NOW()""",
+                        (sync_id, tenant_id, project_id, data_source_id,
+                         source_type, segment_type, source_id_json, now, now),
                     )
                 conn.commit()
         except Exception as e:
             logger.error(f"Sync time update failed: {e}")
 
-    def get_last_sync(self, team_id: str, channel_id: str, project_id: str, tenant_id: str) -> str:
-        sync_id = f"sync-{tenant_id}-{project_id}-{team_id}-{channel_id}"
+    def get_last_sync(self, source_type: str, segment_type: str,
+                      source_identifier: dict, project_id: str, tenant_id: str) -> str:
+        source_id_json = json.dumps(source_identifier, sort_keys=True)
+        sync_id = f"sync-{tenant_id}-{project_id}-{hashlib.md5(source_id_json.encode()).hexdigest()}"
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT last_sync FROM sync_metadata WHERE id = %s", (sync_id,))
+                    cur.execute("SELECT last_sync_at FROM sync_metadata WHERE id = %s", (sync_id,))
                     row = cur.fetchone()
-                    if row:
-                        return row[0]
+                    if row and row[0]:
+                        return row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0])
         except Exception as e:
             logger.error(f"Last sync query failed: {e}")
         return "Never"
@@ -203,7 +232,7 @@ class VectorOps:
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("DELETE FROM teams_messages WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
+                    cur.execute("DELETE FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
                     cur.execute("DELETE FROM sync_metadata WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
                 conn.commit()
         except Exception as e:

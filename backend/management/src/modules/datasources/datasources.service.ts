@@ -2,26 +2,28 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
-import { ProjectDataSource } from '../database/entities/project-data-source.entity';
+import { DataSource } from '../database/entities/data-source.entity';
 import { CreateDataSourceDto } from './dto/create-datasource.dto';
 import { UpdateDataSourceDto } from './dto/update-datasource.dto';
+import { EncryptionService } from '../../common/services/encryption.service';
 
 @Injectable()
 export class DataSourcesService {
   constructor(
-    @InjectRepository(ProjectDataSource)
-    private readonly dataSourceRepository: Repository<ProjectDataSource>,
+    @InjectRepository(DataSource)
+    private readonly dataSourceRepository: Repository<DataSource>,
+    private readonly encryptionService: EncryptionService,
   ) {}
 
-  async findByProject(projectId: string, tenantId: string): Promise<ProjectDataSource[]> {
+  async findByProject(projectId: string, tenantId: string): Promise<DataSource[]> {
     const sources = await this.dataSourceRepository.find({
       where: { project_id: projectId, tenant_id: tenantId },
       order: { created_at: 'DESC' },
     });
-    return sources.map((s) => this.sanitizeConfig(s));
+    return sources.map((s) => this.sanitizeForResponse(s));
   }
 
-  async findOneByTenant(id: string, tenantId: string): Promise<ProjectDataSource> {
+  async findOneByTenant(id: string, tenantId: string): Promise<DataSource> {
     const source = await this.dataSourceRepository.findOne({
       where: { id, tenant_id: tenantId },
     });
@@ -31,9 +33,19 @@ export class DataSourcesService {
     return source;
   }
 
+  async getDecryptedConfig(id: string, tenantId: string): Promise<Record<string, any>> {
+    const source = await this.findOneByTenant(id, tenantId);
+    if (source.encrypted_config) {
+      return this.encryptionService.decryptConfig(source.encrypted_config);
+    }
+    return source.config || {};
+  }
+
   async getConfig(id: string, tenantId: string): Promise<Record<string, any>> {
     const source = await this.findOneByTenant(id, tenantId);
-    const config = source.config || {};
+    const config = source.encrypted_config
+      ? this.encryptionService.decryptConfig(source.encrypted_config)
+      : source.config || {};
     return {
       client_id: config.client_id || '',
       tenant_id: config.tenant_id || '',
@@ -41,28 +53,41 @@ export class DataSourcesService {
     };
   }
 
-  async create(dto: CreateDataSourceDto, tenantId: string): Promise<ProjectDataSource> {
+  async create(dto: CreateDataSourceDto, tenantId: string): Promise<DataSource> {
+    const rawConfig = dto.config || {};
+    const encryptedConfig = this.encryptionService.encryptConfig(rawConfig);
+    const maskedConfig = this.encryptionService.maskConfig(rawConfig);
+
     const source = this.dataSourceRepository.create({
       id: randomUUID(),
       project_id: dto.projectId,
       source_type: dto.sourceType,
-      config: dto.config || {},
+      config: maskedConfig,
+      encrypted_config: encryptedConfig,
+      secrets_updated_at: new Date(),
       tenant_id: tenantId,
       sync_interval_minutes: dto.syncIntervalMinutes ?? 60,
       sync_enabled: dto.syncEnabled ?? false,
     });
     const saved = await this.dataSourceRepository.save(source);
-    return this.sanitizeConfig(saved);
+    return this.sanitizeForResponse(saved);
   }
 
-  async update(id: string, dto: UpdateDataSourceDto, tenantId: string): Promise<ProjectDataSource> {
+  async update(id: string, dto: UpdateDataSourceDto, tenantId: string): Promise<DataSource> {
     const source = await this.findOneByTenant(id, tenantId);
     if (dto.sourceType !== undefined) source.source_type = dto.sourceType;
-    if (dto.config !== undefined) source.config = dto.config;
     if (dto.syncIntervalMinutes !== undefined) source.sync_interval_minutes = dto.syncIntervalMinutes;
     if (dto.syncEnabled !== undefined) source.sync_enabled = dto.syncEnabled;
+
+    if (dto.config !== undefined) {
+      const rawConfig = dto.config;
+      source.encrypted_config = this.encryptionService.encryptConfig(rawConfig);
+      source.config = this.encryptionService.maskConfig(rawConfig);
+      source.secrets_updated_at = new Date();
+    }
+
     const saved = await this.dataSourceRepository.save(source);
-    return this.sanitizeConfig(saved);
+    return this.sanitizeForResponse(saved);
   }
 
   async remove(id: string, tenantId: string): Promise<void> {
@@ -70,14 +95,11 @@ export class DataSourcesService {
     await this.dataSourceRepository.remove(source);
   }
 
-  private sanitizeConfig(source: ProjectDataSource): ProjectDataSource {
+  private sanitizeForResponse(source: DataSource): DataSource {
     if (source.config) {
-      const sanitized = { ...source.config };
-      if (sanitized.client_secret) {
-        sanitized.client_secret = '••••••••';
-      }
-      source.config = sanitized;
+      source.config = this.encryptionService.maskConfig(source.config);
     }
+    delete (source as any).encrypted_config;
     return source;
   }
 }

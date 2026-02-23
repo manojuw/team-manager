@@ -7,6 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from teams_client import TeamsClient
 from vector_ops import VectorOps
+from encryption import decrypt_config
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +38,11 @@ class SyncScheduler:
             conn = psycopg2.connect(DATABASE_URL)
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT ds.id, ds.project_id, ds.tenant_id, ds.config,
+                    SELECT ds.id, ds.project_id, ds.tenant_id, ds.config, ds.encrypted_config,
                            ds.sync_interval_minutes, ds.last_sync_at, ds.source_type
-                    FROM project_data_sources ds
+                    FROM data_source ds
                     WHERE ds.sync_enabled = true
                       AND ds.sync_interval_minutes > 0
-                      AND ds.source_type = 'microsoft_teams'
                       AND (
                         ds.last_sync_at IS NULL
                         OR ds.last_sync_at + (ds.sync_interval_minutes || ' minutes')::interval <= NOW()
@@ -52,22 +52,31 @@ class SyncScheduler:
             conn.close()
 
             for source in due_sources:
-                ds_id, project_id, tenant_id, config, interval, last_sync, source_type = source
-                logger.info(f"Auto-syncing data source {ds_id} (project={project_id})")
+                ds_id, project_id, tenant_id, config, encrypted_config, interval, last_sync, source_type = source
+
+                actual_config = None
+                if encrypted_config:
+                    if isinstance(encrypted_config, str):
+                        encrypted_config = json.loads(encrypted_config)
+                    actual_config = decrypt_config(encrypted_config)
+                elif config:
+                    actual_config = config if isinstance(config, dict) else json.loads(config)
+                else:
+                    actual_config = {}
+
+                logger.info(f"Auto-syncing data source {ds_id} (project={project_id}, type={source_type})")
                 try:
-                    self._sync_data_source(ds_id, project_id, tenant_id, config)
+                    if source_type == 'microsoft_teams':
+                        self._sync_teams_source(ds_id, project_id, tenant_id, actual_config)
                     self._update_last_sync(ds_id)
                 except Exception as e:
                     logger.error(f"Auto-sync failed for {ds_id}: {e}")
-                    self._record_failed_sync(tenant_id, project_id, ds_id, str(e))
+                    self._record_failed_sync(tenant_id, project_id, ds_id, str(e), source_type)
 
         except Exception as e:
             logger.error(f"Sync checker error: {e}")
 
-    def _sync_data_source(self, ds_id: str, project_id: str, tenant_id: str, config):
-        if isinstance(config, str):
-            config = json.loads(config)
-
+    def _sync_teams_source(self, ds_id: str, project_id: str, tenant_id: str, config: dict):
         client_id = config.get("client_id", "")
         client_secret = config.get("client_secret", "")
         azure_tenant_id = config.get("tenant_id", "")
@@ -86,8 +95,15 @@ class SyncScheduler:
             try:
                 channels = client.get_channels(team["id"])
                 for channel in channels:
+                    source_identifier = {
+                        "team_id": team["id"],
+                        "team_name": team["name"],
+                        "channel_id": channel["id"],
+                        "channel_name": channel["name"],
+                    }
+
                     last_sync = self.vector_ops.get_last_sync(
-                        team["id"], channel["id"], project_id, tenant_id
+                        "microsoft_teams", "team_channel", source_identifier, project_id, tenant_id
                     )
                     since = None
                     if last_sync != "Never":
@@ -98,16 +114,20 @@ class SyncScheduler:
 
                     messages = client.get_channel_messages(team["id"], channel["id"], since=since)
                     added = self.vector_ops.add_messages(
-                        messages, team["name"], channel["name"], project_id, tenant_id
+                        messages, "microsoft_teams", "team_channel", source_identifier,
+                        project_id, tenant_id, ds_id
                     )
-                    self.vector_ops.update_sync_time(team["id"], channel["id"], project_id, tenant_id)
+                    self.vector_ops.update_sync_time(
+                        "microsoft_teams", "team_channel", source_identifier,
+                        project_id, tenant_id, ds_id
+                    )
 
                     total_added += added
                     total_fetched += len(messages)
             except Exception as e:
                 logger.error(f"Failed to sync team {team['name']}: {e}")
 
-        self._record_sync(tenant_id, project_id, ds_id, total_added, total_fetched)
+        self._record_sync(tenant_id, project_id, ds_id, total_added, total_fetched, "microsoft_teams")
         logger.info(f"Auto-sync complete for {ds_id}: {total_added} added, {total_fetched} fetched")
 
     def _update_last_sync(self, ds_id: str):
@@ -115,7 +135,7 @@ class SyncScheduler:
             conn = psycopg2.connect(DATABASE_URL)
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE project_data_sources SET last_sync_at = NOW() WHERE id = %s",
+                    "UPDATE data_source SET last_sync_at = NOW() WHERE id = %s",
                     (ds_id,),
                 )
             conn.commit()
@@ -123,28 +143,32 @@ class SyncScheduler:
         except Exception as e:
             logger.error(f"Failed to update last_sync_at: {e}")
 
-    def _record_sync(self, tenant_id, project_id, ds_id, added, fetched):
+    def _record_sync(self, tenant_id, project_id, ds_id, added, fetched, source_type=None):
         try:
             conn = psycopg2.connect(DATABASE_URL)
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO sync_history (tenant_id, project_id, data_source_id, status, messages_added, messages_fetched, completed_at)
-                       VALUES (%s, %s, %s, 'completed', %s, %s, NOW())""",
-                    (tenant_id, project_id, ds_id, added, fetched),
+                    """INSERT INTO sync_history
+                       (tenant_id, project_id, data_source_id, source_type, status,
+                        records_added, records_fetched, completed_at)
+                       VALUES (%s, %s, %s, %s, 'completed', %s, %s, NOW())""",
+                    (tenant_id, project_id, ds_id, source_type, added, fetched),
                 )
             conn.commit()
             conn.close()
         except Exception as e:
             logger.error(f"Failed to record sync: {e}")
 
-    def _record_failed_sync(self, tenant_id, project_id, ds_id, error_msg):
+    def _record_failed_sync(self, tenant_id, project_id, ds_id, error_msg, source_type=None):
         try:
             conn = psycopg2.connect(DATABASE_URL)
             with conn.cursor() as cur:
                 cur.execute(
-                    """INSERT INTO sync_history (tenant_id, project_id, data_source_id, status, error_message, completed_at)
-                       VALUES (%s, %s, %s, 'failed', %s, NOW())""",
-                    (tenant_id, project_id, ds_id, error_msg[:500]),
+                    """INSERT INTO sync_history
+                       (tenant_id, project_id, data_source_id, source_type, status,
+                        error_message, completed_at)
+                       VALUES (%s, %s, %s, %s, 'failed', %s, NOW())""",
+                    (tenant_id, project_id, ds_id, source_type, error_msg[:500]),
                 )
             conn.commit()
             conn.close()

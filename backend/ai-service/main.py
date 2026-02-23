@@ -17,6 +17,7 @@ from teams_client import TeamsClient
 from vector_ops import VectorOps
 from ai_ops import ask_question_ai, summarize_ai
 from scheduler import SyncScheduler
+from encryption import decrypt_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -116,26 +117,40 @@ class ListGroupChatsRequest(BaseModel):
     user_ids: list[str]
 
 
-def _get_teams_client(data_source_id: str, tenant_id: str) -> TeamsClient:
+def _get_data_source_config(data_source_id: str, tenant_id: str) -> dict:
     conn = psycopg2.connect(DATABASE_URL)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT config FROM project_data_sources WHERE id = %s AND tenant_id = %s",
+                "SELECT config, encrypted_config FROM data_source WHERE id = %s AND tenant_id = %s",
                 (data_source_id, tenant_id),
             )
             row = cur.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail="Data source not found")
-            config = row[0] if isinstance(row[0], dict) else json.loads(row[0])
-            client_id = config.get("client_id", "")
-            client_secret = config.get("client_secret", "")
-            azure_tenant_id = config.get("tenant_id", "")
-            if not all([client_id, client_secret, azure_tenant_id]):
-                raise HTTPException(status_code=400, detail="Data source credentials not configured")
-            return TeamsClient(client_id, client_secret, azure_tenant_id)
+
+            encrypted_config = row[1]
+            if encrypted_config:
+                if isinstance(encrypted_config, str):
+                    encrypted_config = json.loads(encrypted_config)
+                return decrypt_config(encrypted_config)
+
+            config = row[0]
+            if isinstance(config, str):
+                config = json.loads(config)
+            return config or {}
     finally:
         conn.close()
+
+
+def _get_teams_client(data_source_id: str, tenant_id: str) -> TeamsClient:
+    config = _get_data_source_config(data_source_id, tenant_id)
+    client_id = config.get("client_id", "")
+    client_secret = config.get("client_secret", "")
+    azure_tenant_id = config.get("tenant_id", "")
+    if not all([client_id, client_secret, azure_tenant_id]):
+        raise HTTPException(status_code=400, detail="Data source credentials not configured")
+    return TeamsClient(client_id, client_secret, azure_tenant_id)
 
 
 @app.get("/api/health")
@@ -176,7 +191,16 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
     tenant_id = user["tenantId"]
     client = _get_teams_client(req.data_source_id, tenant_id)
 
-    last_sync = vector_ops.get_last_sync(req.team_id, req.channel_id, req.project_id, tenant_id)
+    source_identifier = {
+        "team_id": req.team_id,
+        "team_name": req.team_name,
+        "channel_id": req.channel_id,
+        "channel_name": req.channel_name,
+    }
+
+    last_sync = vector_ops.get_last_sync(
+        "microsoft_teams", "team_channel", source_identifier, req.project_id, tenant_id
+    )
     since = None
     if last_sync != "Never":
         try:
@@ -185,10 +209,17 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
             since = None
 
     messages = client.get_channel_messages(req.team_id, req.channel_id, since=since)
-    added = vector_ops.add_messages(messages, req.team_name, req.channel_name, req.project_id, tenant_id)
-    vector_ops.update_sync_time(req.team_id, req.channel_id, req.project_id, tenant_id)
+    added = vector_ops.add_messages(
+        messages, "microsoft_teams", "team_channel", source_identifier,
+        req.project_id, tenant_id, req.data_source_id
+    )
+    vector_ops.update_sync_time(
+        "microsoft_teams", "team_channel", source_identifier,
+        req.project_id, tenant_id, req.data_source_id
+    )
 
-    _record_sync_history(tenant_id, req.project_id, req.data_source_id, added, len(messages))
+    _record_sync_history(tenant_id, req.project_id, req.data_source_id, added, len(messages),
+                         "microsoft_teams", "team_channel")
 
     replies_count = sum(1 for m in messages if m.get("message_type") == "reply")
     posts_count = len(messages) - replies_count
@@ -206,8 +237,14 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
     tenant_id = user["tenantId"]
     client = _get_teams_client(req.data_source_id, tenant_id)
 
-    sync_key = f"chat-{req.chat_id}"
-    last_sync = vector_ops.get_last_sync(sync_key, "group_chat", req.project_id, tenant_id)
+    source_identifier = {
+        "chat_id": req.chat_id,
+        "chat_name": req.chat_name,
+    }
+
+    last_sync = vector_ops.get_last_sync(
+        "microsoft_teams", "group_chat", source_identifier, req.project_id, tenant_id
+    )
     since = None
     if last_sync != "Never":
         try:
@@ -216,10 +253,17 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
             since = None
 
     messages = client.get_chat_messages(req.chat_id, since=since)
-    added = vector_ops.add_messages(messages, req.chat_name, "Group Chat", req.project_id, tenant_id)
-    vector_ops.update_sync_time(sync_key, "group_chat", req.project_id, tenant_id)
+    added = vector_ops.add_messages(
+        messages, "microsoft_teams", "group_chat", source_identifier,
+        req.project_id, tenant_id, req.data_source_id
+    )
+    vector_ops.update_sync_time(
+        "microsoft_teams", "group_chat", source_identifier,
+        req.project_id, tenant_id, req.data_source_id
+    )
 
-    _record_sync_history(tenant_id, req.project_id, req.data_source_id, added, len(messages))
+    _record_sync_history(tenant_id, req.project_id, req.data_source_id, added, len(messages),
+                         "microsoft_teams", "group_chat")
 
     return {"added": added, "total_fetched": len(messages)}
 
@@ -278,14 +322,18 @@ def clear_project_data(project_id: str, user=Depends(verify_token)):
     return {"success": True}
 
 
-def _record_sync_history(tenant_id: str, project_id: str, data_source_id: str, added: int, fetched: int):
+def _record_sync_history(tenant_id: str, project_id: str, data_source_id: str,
+                         added: int, fetched: int, source_type: str = None,
+                         segment_type: str = None):
     try:
         conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO sync_history (tenant_id, project_id, data_source_id, status, messages_added, messages_fetched, completed_at)
-                   VALUES (%s, %s, %s, 'completed', %s, %s, NOW())""",
-                (tenant_id, project_id, data_source_id, added, fetched),
+                """INSERT INTO sync_history
+                   (tenant_id, project_id, data_source_id, source_type, segment_type,
+                    status, records_added, records_fetched, completed_at)
+                   VALUES (%s, %s, %s, %s, %s, 'completed', %s, %s, NOW())""",
+                (tenant_id, project_id, data_source_id, source_type, segment_type, added, fetched),
             )
         conn.commit()
         conn.close()

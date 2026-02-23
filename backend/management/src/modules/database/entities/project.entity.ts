@@ -1,8 +1,8 @@
 import { Entity, PrimaryColumn, Column, CreateDateColumn, ManyToOne, JoinColumn, OneToMany } from 'typeorm';
 import { Tenant } from './tenant.entity';
-import { ProjectDataSource } from './project-data-source.entity';
+import { DataSource as DataSourceEntity } from './data-source.entity';
 
-@Entity('projects')
+@Entity('project')
 export class Project {
   @PrimaryColumn({ type: 'text' })
   id: string;
@@ -23,6 +23,6 @@ export class Project {
   @JoinColumn({ name: 'tenant_id' })
   tenant: Tenant;
 
-  @OneToMany(() => ProjectDataSource, (ds) => ds.project)
-  dataSources: ProjectDataSource[];
+  @OneToMany(() => DataSourceEntity, (ds) => ds.project)
+  dataSources: DataSourceEntity[];
 }

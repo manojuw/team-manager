@@ -8,20 +8,26 @@ export class SyncHistory {
   @Column({ type: 'uuid', name: 'tenant_id' })
   tenant_id: string;
 
-  @Column({ type: 'uuid', name: 'project_id' })
+  @Column({ type: 'text', name: 'project_id' })
   project_id: string;
 
-  @Column({ type: 'uuid', name: 'data_source_id' })
+  @Column({ type: 'text', name: 'data_source_id' })
   data_source_id: string;
+
+  @Column({ type: 'text', nullable: true, name: 'source_type' })
+  source_type: string;
+
+  @Column({ type: 'text', nullable: true, name: 'segment_type' })
+  segment_type: string;
 
   @Column({ type: 'text' })
   status: string;
 
-  @Column({ type: 'int', nullable: true, name: 'messages_added' })
-  messages_added: number;
+  @Column({ type: 'int', nullable: true, name: 'records_added' })
+  records_added: number;
 
-  @Column({ type: 'int', nullable: true, name: 'messages_fetched' })
-  messages_fetched: number;
+  @Column({ type: 'int', nullable: true, name: 'records_fetched' })
+  records_fetched: number;
 
   @Column({ type: 'text', nullable: true, name: 'error_message' })
   error_message: string;

@@ -31,8 +31,8 @@ export class SyncService {
     return {
       status: latest.status,
       lastSync: latest.completed_at || latest.started_at,
-      messagesAdded: latest.messages_added,
-      messagesFetched: latest.messages_fetched,
+      recordsAdded: latest.records_added,
+      recordsFetched: latest.records_fetched,
       error: latest.error_message,
     };
   }
