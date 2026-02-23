@@ -44,12 +44,12 @@ export class DataSourcesService {
   async create(dto: CreateDataSourceDto, tenantId: string): Promise<ProjectDataSource> {
     const source = this.dataSourceRepository.create({
       id: randomUUID(),
-      project_id: dto.project_id,
-      source_type: dto.source_type,
+      project_id: dto.projectId,
+      source_type: dto.sourceType,
       config: dto.config || {},
       tenant_id: tenantId,
-      sync_interval_minutes: dto.sync_interval_minutes || 60,
-      sync_enabled: dto.sync_enabled ?? false,
+      sync_interval_minutes: dto.syncIntervalMinutes ?? 60,
+      sync_enabled: dto.syncEnabled ?? false,
     });
     const saved = await this.dataSourceRepository.save(source);
     return this.sanitizeConfig(saved);
@@ -57,10 +57,10 @@ export class DataSourcesService {
 
   async update(id: string, dto: UpdateDataSourceDto, tenantId: string): Promise<ProjectDataSource> {
     const source = await this.findOneByTenant(id, tenantId);
-    if (dto.source_type !== undefined) source.source_type = dto.source_type;
+    if (dto.sourceType !== undefined) source.source_type = dto.sourceType;
     if (dto.config !== undefined) source.config = dto.config;
-    if (dto.sync_interval_minutes !== undefined) source.sync_interval_minutes = dto.sync_interval_minutes;
-    if (dto.sync_enabled !== undefined) source.sync_enabled = dto.sync_enabled;
+    if (dto.syncIntervalMinutes !== undefined) source.sync_interval_minutes = dto.syncIntervalMinutes;
+    if (dto.syncEnabled !== undefined) source.sync_enabled = dto.syncEnabled;
     const saved = await this.dataSourceRepository.save(source);
     return this.sanitizeConfig(saved);
   }

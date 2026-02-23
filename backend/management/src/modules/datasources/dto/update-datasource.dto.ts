@@ -3,7 +3,7 @@ import { IsOptional, IsObject, IsString, IsNumber, IsBoolean } from 'class-valid
 export class UpdateDataSourceDto {
   @IsOptional()
   @IsString()
-  source_type?: string;
+  sourceType?: string;
 
   @IsOptional()
   @IsObject()
@@ -11,9 +11,9 @@ export class UpdateDataSourceDto {
 
   @IsOptional()
   @IsNumber()
-  sync_interval_minutes?: number;
+  syncIntervalMinutes?: number;
 
   @IsOptional()
   @IsBoolean()
-  sync_enabled?: boolean;
+  syncEnabled?: boolean;
 }

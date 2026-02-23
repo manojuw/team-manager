@@ -3,11 +3,11 @@ import { IsString, MinLength, IsOptional, IsObject, IsNumber, IsBoolean } from '
 export class CreateDataSourceDto {
   @IsString()
   @MinLength(1)
-  project_id: string;
+  projectId: string;
 
   @IsString()
   @MinLength(1)
-  source_type: string;
+  sourceType: string;
 
   @IsOptional()
   @IsObject()
@@ -15,9 +15,9 @@ export class CreateDataSourceDto {
 
   @IsOptional()
   @IsNumber()
-  sync_interval_minutes?: number;
+  syncIntervalMinutes?: number;
 
   @IsOptional()
   @IsBoolean()
-  sync_enabled?: boolean;
+  syncEnabled?: boolean;
 }
