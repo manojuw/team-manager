@@ -76,7 +76,8 @@ Follows SOLID principles with clean separation of concerns:
 
 ## Configuration
 - Proxy routes: `/api/management/*` → port 3001, `/api/ai/*` → port 8001, all else → port 5001 (Next.js)
-- Startup: Modified streamlit wrapper starts all services then execs into proxy on port 5000
+- Startup: `start.sh` launches NestJS (3001), AI service (8001), Next.js (5001), then runs `proxy.py` on port 5000
+- `proxy.py` is a standalone threaded Python HTTP reverse proxy (no Streamlit dependency)
 - JWT secret: SESSION_SECRET environment variable (required)
 - Azure AD credentials stored encrypted per connector in connector.encrypted_config JSONB
 
