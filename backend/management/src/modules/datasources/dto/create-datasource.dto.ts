@@ -3,7 +3,11 @@ import { IsString, MinLength, IsOptional, IsObject, IsNumber, IsBoolean } from '
 export class CreateDataSourceDto {
   @IsString()
   @MinLength(1)
-  projectId: string;
+  connectorId: string;
+
+  @IsString()
+  @MinLength(1)
+  name: string;
 
   @IsString()
   @MinLength(1)

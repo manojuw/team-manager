@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { DatabaseModule } from './modules/database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { ProjectsModule } from './modules/projects/projects.module';
+import { ConnectorsModule } from './modules/connectors/connectors.module';
 import { DataSourcesModule } from './modules/datasources/datasources.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { HealthModule } from './modules/health/health.module';
@@ -11,6 +12,7 @@ import { HealthModule } from './modules/health/health.module';
     DatabaseModule,
     AuthModule,
     ProjectsModule,
+    ConnectorsModule,
     DataSourcesModule,
     SyncModule,
     HealthModule,

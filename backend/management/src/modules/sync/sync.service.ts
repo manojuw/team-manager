@@ -18,6 +18,14 @@ export class SyncService {
     });
   }
 
+  async getHistoryByConnector(connectorId: string, tenantId: string): Promise<SyncHistory[]> {
+    return this.syncHistoryRepository.find({
+      where: { connector_id: connectorId, tenant_id: tenantId },
+      order: { started_at: 'DESC' },
+      take: 50,
+    });
+  }
+
   async getStatus(projectId: string, tenantId: string) {
     const latest = await this.syncHistoryRepository.findOne({
       where: { project_id: projectId, tenant_id: tenantId },

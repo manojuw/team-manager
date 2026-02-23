@@ -54,11 +54,24 @@ export const projects = {
     fetchWithAuth(`${MANAGEMENT_API}/projects/${id}`, { method: "DELETE" }),
 };
 
+export const connectors = {
+  list: (projectId: string) => fetchWithAuth(`${MANAGEMENT_API}/connectors/project/${projectId}`),
+  get: (id: string) => fetchWithAuth(`${MANAGEMENT_API}/connectors/${id}`),
+  create: (data: { projectId: string; name: string; connectorType: string; config?: Record<string, unknown> }) =>
+    fetchWithAuth(`${MANAGEMENT_API}/connectors`, { method: "POST", body: JSON.stringify(data) }),
+  update: (id: string, data: { name?: string; config?: Record<string, unknown> }) =>
+    fetchWithAuth(`${MANAGEMENT_API}/connectors/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  delete: (id: string) =>
+    fetchWithAuth(`${MANAGEMENT_API}/connectors/${id}`, { method: "DELETE" }),
+};
+
 export const dataSources = {
-  list: (projectId: string) => fetchWithAuth(`${MANAGEMENT_API}/datasources/project/${projectId}`),
-  create: (data: { projectId: string; sourceType: string; config?: Record<string, unknown>; syncIntervalMinutes?: number; syncEnabled?: boolean }) =>
+  listByConnector: (connectorId: string) => fetchWithAuth(`${MANAGEMENT_API}/datasources/connector/${connectorId}`),
+  listByProject: (projectId: string) => fetchWithAuth(`${MANAGEMENT_API}/datasources/project/${projectId}`),
+  get: (id: string) => fetchWithAuth(`${MANAGEMENT_API}/datasources/${id}`),
+  create: (data: { connectorId: string; name: string; sourceType: string; config?: Record<string, unknown>; syncIntervalMinutes?: number; syncEnabled?: boolean }) =>
     fetchWithAuth(`${MANAGEMENT_API}/datasources`, { method: "POST", body: JSON.stringify(data) }),
-  update: (id: string, data: { config?: Record<string, unknown>; syncIntervalMinutes?: number; syncEnabled?: boolean }) =>
+  update: (id: string, data: { name?: string; config?: Record<string, unknown>; syncIntervalMinutes?: number; syncEnabled?: boolean }) =>
     fetchWithAuth(`${MANAGEMENT_API}/datasources/${id}`, { method: "PUT", body: JSON.stringify(data) }),
   delete: (id: string) =>
     fetchWithAuth(`${MANAGEMENT_API}/datasources/${id}`, { method: "DELETE" }),
@@ -66,21 +79,22 @@ export const dataSources = {
 
 export const sync = {
   history: (projectId: string) => fetchWithAuth(`${MANAGEMENT_API}/sync/history/${projectId}`),
+  historyByConnector: (connectorId: string) => fetchWithAuth(`${MANAGEMENT_API}/sync/history/connector/${connectorId}`),
   status: (projectId: string) => fetchWithAuth(`${MANAGEMENT_API}/sync/status/${projectId}`),
 };
 
 export const teams = {
-  listTeams: (dataSourceId: string) =>
-    fetchWithAuth(`${AI_API}/teams/list-teams`, { method: "POST", body: JSON.stringify({ data_source_id: dataSourceId }) }),
-  listChannels: (dataSourceId: string, teamId: string) =>
-    fetchWithAuth(`${AI_API}/teams/list-channels`, { method: "POST", body: JSON.stringify({ data_source_id: dataSourceId, team_id: teamId }) }),
-  listUsers: (dataSourceId: string) =>
-    fetchWithAuth(`${AI_API}/teams/list-users`, { method: "POST", body: JSON.stringify({ data_source_id: dataSourceId }) }),
-  listGroupChats: (dataSourceId: string, userIds: string[]) =>
-    fetchWithAuth(`${AI_API}/teams/list-group-chats`, { method: "POST", body: JSON.stringify({ data_source_id: dataSourceId, user_ids: userIds }) }),
-  syncChannel: (data: { project_id: string; data_source_id: string; team_id: string; team_name: string; channel_id: string; channel_name: string }) =>
+  listTeams: (connectorId: string) =>
+    fetchWithAuth(`${AI_API}/teams/list-teams`, { method: "POST", body: JSON.stringify({ connector_id: connectorId }) }),
+  listChannels: (connectorId: string, teamId: string) =>
+    fetchWithAuth(`${AI_API}/teams/list-channels`, { method: "POST", body: JSON.stringify({ connector_id: connectorId, team_id: teamId }) }),
+  listUsers: (connectorId: string) =>
+    fetchWithAuth(`${AI_API}/teams/list-users`, { method: "POST", body: JSON.stringify({ connector_id: connectorId }) }),
+  listGroupChats: (connectorId: string, userIds: string[]) =>
+    fetchWithAuth(`${AI_API}/teams/list-group-chats`, { method: "POST", body: JSON.stringify({ connector_id: connectorId, user_ids: userIds }) }),
+  syncChannel: (data: { project_id: string; connector_id: string; data_source_id?: string; team_id: string; team_name: string; channel_id: string; channel_name: string }) =>
     fetchWithAuth(`${AI_API}/sync/channel`, { method: "POST", body: JSON.stringify(data) }),
-  syncGroupChat: (data: { project_id: string; data_source_id: string; chat_id: string; chat_name: string }) =>
+  syncGroupChat: (data: { project_id: string; connector_id: string; data_source_id?: string; chat_id: string; chat_name: string }) =>
     fetchWithAuth(`${AI_API}/sync/group-chat`, { method: "POST", body: JSON.stringify(data) }),
 };
 

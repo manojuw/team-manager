@@ -19,9 +19,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import {
   FolderOpen,
-  Database,
-  Hash,
-  MessageSquare,
+  Plug,
   BookOpen,
   HelpCircle,
   Settings,
@@ -33,9 +31,7 @@ import {
 
 const navItems = [
   { href: "/dashboard/projects", label: "Projects", icon: FolderOpen },
-  { href: "/dashboard/data-sources", label: "Data Sources", icon: Database },
-  { href: "/dashboard/channels", label: "Channels", icon: Hash },
-  { href: "/dashboard/group-chats", label: "Group Chats", icon: MessageSquare },
+  { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
   { href: "/dashboard/knowledge-base", label: "Knowledge Base", icon: BookOpen },
   { href: "/dashboard/ask", label: "Ask Questions", icon: HelpCircle },
   { href: "/dashboard/settings", label: "Settings", icon: Settings },

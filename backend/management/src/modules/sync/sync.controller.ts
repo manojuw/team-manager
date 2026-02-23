@@ -14,6 +14,11 @@ export class SyncController {
     return this.syncService.getHistory(projectId, user.tenantId);
   }
 
+  @Get('history/connector/:connectorId')
+  async getHistoryByConnector(@Param('connectorId') connectorId: string, @CurrentUser() user: IAuthUser) {
+    return this.syncService.getHistoryByConnector(connectorId, user.tenantId);
+  }
+
   @Get('status/:projectId')
   async getStatus(@Param('projectId') projectId: string, @CurrentUser() user: IAuthUser) {
     return this.syncService.getStatus(projectId, user.tenantId);

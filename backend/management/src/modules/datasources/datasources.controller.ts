@@ -16,14 +16,19 @@ export class DataSourcesController {
     return this.dataSourcesService.create(dto, user.tenantId);
   }
 
+  @Get('connector/:connectorId')
+  async findByConnector(@Param('connectorId') connectorId: string, @CurrentUser() user: IAuthUser) {
+    return this.dataSourcesService.findByConnector(connectorId, user.tenantId);
+  }
+
   @Get('project/:projectId')
   async findByProject(@Param('projectId') projectId: string, @CurrentUser() user: IAuthUser) {
     return this.dataSourcesService.findByProject(projectId, user.tenantId);
   }
 
-  @Get(':id/config')
-  async getConfig(@Param('id') id: string, @CurrentUser() user: IAuthUser) {
-    return this.dataSourcesService.getConfig(id, user.tenantId);
+  @Get(':id')
+  async findOne(@Param('id') id: string, @CurrentUser() user: IAuthUser) {
+    return this.dataSourcesService.findOneByTenant(id, user.tenantId);
   }
 
   @Put(':id')

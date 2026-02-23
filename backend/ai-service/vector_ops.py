@@ -43,7 +43,7 @@ class VectorOps:
 
     def add_messages(self, messages: list, source_type: str, segment_type: str,
                      source_identifier: dict, project_id: str, tenant_id: str,
-                     data_source_id: str = None) -> int:
+                     connector_id: str = None, data_source_id: str = None) -> int:
         if not messages:
             return 0
         added = 0
@@ -81,13 +81,13 @@ class VectorOps:
                         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
                         cur.execute(
                             """INSERT INTO semantic_data
-                               (id, tenant_id, project_id, data_source_id, source_type, segment_type,
-                                source_identifier, content, embedding, sender, created_at,
-                                message_type, message_id, parent_message_id)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::vector, %s, %s, %s, %s, %s)
+                               (id, tenant_id, project_id, connector_id, data_source_id,
+                                source_type, segment_type, source_identifier, content, embedding,
+                                sender, created_at, message_type, message_id, parent_message_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s::vector, %s, %s, %s, %s, %s)
                                ON CONFLICT (id) DO NOTHING""",
                             (
-                                doc_id, tenant_id, project_id, data_source_id,
+                                doc_id, tenant_id, project_id, connector_id, data_source_id,
                                 source_type, segment_type, source_id_json,
                                 doc_text, embedding_str,
                                 msg.get("sender", "Unknown"), msg.get("created_at", ""),
@@ -193,7 +193,7 @@ class VectorOps:
 
     def update_sync_time(self, source_type: str, segment_type: str,
                          source_identifier: dict, project_id: str, tenant_id: str,
-                         data_source_id: str = None):
+                         connector_id: str = None, data_source_id: str = None):
         source_id_json = json.dumps(source_identifier, sort_keys=True)
         sync_id = f"sync-{tenant_id}-{project_id}-{hashlib.md5(source_id_json.encode()).hexdigest()}"
         now = datetime.now(timezone.utc).isoformat()
@@ -202,11 +202,11 @@ class VectorOps:
                 with conn.cursor() as cur:
                     cur.execute(
                         """INSERT INTO sync_metadata
-                           (id, tenant_id, project_id, data_source_id, source_type, segment_type,
-                            source_identifier, last_sync_at, updated_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, NOW())
+                           (id, tenant_id, project_id, connector_id, data_source_id,
+                            source_type, segment_type, source_identifier, last_sync_at, updated_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, NOW())
                            ON CONFLICT (id) DO UPDATE SET last_sync_at = %s, updated_at = NOW()""",
-                        (sync_id, tenant_id, project_id, data_source_id,
+                        (sync_id, tenant_id, project_id, connector_id, data_source_id,
                          source_type, segment_type, source_id_json, now, now),
                     )
                 conn.commit()

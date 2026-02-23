@@ -3,7 +3,7 @@ import { IsOptional, IsObject, IsString, IsNumber, IsBoolean } from 'class-valid
 export class UpdateDataSourceDto {
   @IsOptional()
   @IsString()
-  sourceType?: string;
+  name?: string;
 
   @IsOptional()
   @IsObject()

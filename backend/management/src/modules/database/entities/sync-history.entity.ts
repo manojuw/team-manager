@@ -11,7 +11,10 @@ export class SyncHistory {
   @Column({ type: 'text', name: 'project_id' })
   project_id: string;
 
-  @Column({ type: 'text', name: 'data_source_id' })
+  @Column({ type: 'text', nullable: true, name: 'connector_id' })
+  connector_id: string;
+
+  @Column({ type: 'text', nullable: true, name: 'data_source_id' })
   data_source_id: string;
 
   @Column({ type: 'text', nullable: true, name: 'source_type' })
