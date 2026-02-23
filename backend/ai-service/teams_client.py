@@ -73,7 +73,7 @@ class TeamsClient:
             f"&$select=id,displayName,description"
         )
         teams = self._get_all_pages(url, advanced_query=True)
-        return [{"id": t["id"], "name": t.get("displayName", "Unknown")} for t in teams]
+        return [{"id": t["id"], "displayName": t.get("displayName", "Unknown")} for t in teams]
 
     def get_channels(self, team_id: str) -> list:
         url = f"{GRAPH_API_BASE}/teams/{team_id}/channels"
@@ -81,7 +81,7 @@ class TeamsClient:
         return [
             {
                 "id": c["id"],
-                "name": c.get("displayName", "Unknown"),
+                "displayName": c.get("displayName", "Unknown"),
                 "description": c.get("description", ""),
             }
             for c in channels
@@ -205,8 +205,8 @@ class TeamsClient:
         return [
             {
                 "id": u["id"],
-                "name": u.get("displayName", "Unknown"),
-                "email": u.get("mail") or u.get("userPrincipalName", ""),
+                "displayName": u.get("displayName", "Unknown"),
+                "mail": u.get("mail") or u.get("userPrincipalName", ""),
             }
             for u in users
             if u.get("displayName")
@@ -253,10 +253,8 @@ class TeamsClient:
 
             results.append({
                 "id": chat_id,
-                "name": display_name or "Unnamed Chat",
-                "topic": topic,
-                "member_count": len(member_names),
-                "members": member_names,
+                "topic": topic or display_name or "Unnamed Chat",
+                "members": [{"displayName": n} for n in member_names],
                 "last_updated": chat.get("lastUpdatedDateTime", ""),
             })
         return results
