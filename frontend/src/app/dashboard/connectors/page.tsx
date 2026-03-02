@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { z } from "zod";
 
 import { useProject } from "@/hooks/use-project";
-import { connectors, dataSources, teams } from "@/lib/api";
+import { connectors, dataSources, teams, sync } from "@/lib/api";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -392,6 +392,7 @@ function ConnectorCard({
   const [sourceList, setSourceList] = useState<DataSourceItem[]>([]);
   const [loadingSources, setLoadingSources] = useState(false);
   const [addSourceType, setAddSourceType] = useState<string | null>(null);
+  const [syncingSourceId, setSyncingSourceId] = useState<string | null>(null);
 
   useEffect(() => {
     if (expanded) {
@@ -408,6 +409,40 @@ function ConnectorCard({
       toast.error(error instanceof Error ? error.message : "Failed to load data sources");
     } finally {
       setLoadingSources(false);
+    }
+  }
+
+  async function syncNow(source: DataSourceItem) {
+    setSyncingSourceId(source.id);
+    try {
+      let result;
+      if (source.source_type === "team_channel") {
+        result = await teams.syncChannel({
+          project_id: currentProject.id,
+          connector_id: connector.id,
+          data_source_id: source.id,
+          team_id: source.config.team_id,
+          team_name: source.config.team_name,
+          channel_id: source.config.channel_id,
+          channel_name: source.config.channel_name,
+        });
+      } else if (source.source_type === "group_chat") {
+        result = await teams.syncGroupChat({
+          project_id: currentProject.id,
+          connector_id: connector.id,
+          data_source_id: source.id,
+          chat_id: source.config.chat_id,
+          chat_name: source.config.chat_name,
+        });
+      }
+      const added = result?.added ?? 0;
+      const fetched = result?.total_fetched ?? 0;
+      toast.success(`Sync complete: ${added} new messages added (${fetched} fetched)`);
+      await fetchSources();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Sync failed");
+    } finally {
+      setSyncingSourceId(null);
     }
   }
 
@@ -515,12 +550,27 @@ function ConnectorCard({
                       <div className="font-medium text-sm truncate">{source.name}</div>
                       <div className="text-xs text-muted-foreground">
                         {source.source_type === "team_channel" ? "Channel" : "Group Chat"}
-                        {source.last_sync_at && (
-                          <span className="ml-2">Last synced: {new Date(source.last_sync_at).toLocaleString()}</span>
-                        )}
+                        <span className="ml-2">
+                          {source.last_sync_at
+                            ? `Last synced: ${new Date(source.last_sync_at).toLocaleString()}`
+                            : "Never synced"}
+                        </span>
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-8 text-xs"
+                        disabled={syncingSourceId === source.id}
+                        onClick={() => syncNow(source)}
+                      >
+                        {syncingSourceId === source.id ? (
+                          <><Loader2 className="size-3 animate-spin" /> Syncing…</>
+                        ) : (
+                          <><RefreshCw className="size-3" /> Sync Now</>
+                        )}
+                      </Button>
                       <Select
                         value={String(source.sync_interval_minutes ?? 0)}
                         onValueChange={(val) => updateSyncInterval(source.id, parseInt(val))}
