@@ -1,3 +1,4 @@
+import base64
 import logging
 import re
 import msal
@@ -374,7 +375,26 @@ class TeamsClient:
 
         return results
 
+    def _encode_sharing_url(self, url: str) -> str:
+        encoded = base64.b64encode(url.encode("utf-8")).decode("utf-8")
+        encoded = encoded.rstrip("=").replace("/", "_").replace("+", "-")
+        return f"u!{encoded}"
+
+    def download_via_sharing_url(self, sharepoint_url: str) -> bytes:
+        sharing_token = self._encode_sharing_url(sharepoint_url)
+        url = f"{GRAPH_API_BASE}/shares/{sharing_token}/driveItem/content"
+        try:
+            return self._get_raw(url)
+        except Exception as e:
+            logger.warning(f"Failed to download via sharing URL: {e}")
+            return b""
+
     def download_attachment_content(self, content_url: str) -> bytes:
+        if "sharepoint.com" in content_url or "sharepoint.us" in content_url:
+            result = self.download_via_sharing_url(content_url)
+            if result:
+                return result
+
         try:
             return self._get_raw(content_url)
         except Exception as e:

@@ -46,23 +46,27 @@ def process_transcripts(messages: list, client: TeamsClient, chat_or_channel_bas
 def _download_vtt_attachment(client: TeamsClient, att: dict, base_url: str, msg_id: str) -> str:
     content_url = att.get("content_url", "")
     att_id = att.get("id", "")
+    att_name = att.get("name", "unknown.vtt")
 
     if content_url:
         try:
             raw = client.download_attachment_content(content_url)
             if raw:
+                logger.info(f"Downloaded VTT attachment '{att_name}' ({len(raw)} bytes)")
                 return raw.decode("utf-8", errors="replace")
         except Exception as e:
-            logger.warning(f"Failed to download VTT from content_url: {e}")
+            logger.warning(f"Failed to download VTT '{att_name}' from content_url: {e}")
 
     if att_id and base_url:
         try:
             raw = client.download_hosted_content(base_url, msg_id, att_id)
             if raw:
+                logger.info(f"Downloaded VTT attachment '{att_name}' via hosted content ({len(raw)} bytes)")
                 return raw.decode("utf-8", errors="replace")
         except Exception as e:
-            logger.warning(f"Failed to download VTT from hosted content: {e}")
+            logger.warning(f"Failed to download VTT '{att_name}' from hosted content: {e}")
 
+    logger.warning(f"All download methods failed for VTT attachment '{att_name}'")
     return ""
 
 

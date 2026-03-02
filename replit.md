@@ -85,6 +85,7 @@ Follows SOLID principles with clean separation of concerns:
 ## Required Azure AD Permissions
 - `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`
 - `Chat.Read.All` (for group chats), `User.Read.All` (for user discovery)
+- `Files.Read.All` (for downloading file attachments shared in chats/channels via SharePoint)
 - `OnlineMeetingTranscript.Read.All` (optional, for auto-fetching Teams meeting transcripts — requires admin policy)
 
 ## Transcript Ingestion
