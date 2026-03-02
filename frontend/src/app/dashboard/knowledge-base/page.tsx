@@ -46,13 +46,13 @@ interface SyncRecord {
   id?: string;
   project_id?: string;
   source_type?: string;
-  team_name?: string;
-  channel_name?: string;
-  chat_name?: string;
-  messages_synced?: number;
+  segment_type?: string;
+  records_added?: number;
+  records_fetched?: number;
   status?: string;
-  synced_at?: string;
-  created_at?: string;
+  error_message?: string;
+  started_at?: string;
+  completed_at?: string;
 }
 
 interface SearchResult {
@@ -309,30 +309,41 @@ export default function KnowledgeBasePage() {
                 <TableRow>
                   <TableHead>Timestamp</TableHead>
                   <TableHead>Source</TableHead>
-                  <TableHead>Messages Synced</TableHead>
+                  <TableHead>Added / Fetched</TableHead>
                   <TableHead>Status</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {syncHistory.map((record, index) => (
-                  <TableRow key={record.id || index}>
-                    <TableCell className="text-sm">
-                      {record.synced_at || record.created_at
-                        ? new Date(record.synced_at || record.created_at || "").toLocaleString()
-                        : "—"}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {record.chat_name
-                        ? record.chat_name
-                        : [record.team_name, record.channel_name].filter(Boolean).join(" / ") || record.source_type || "—"}
-                    </TableCell>
-                    <TableCell className="text-sm">{record.messages_synced ?? "—"}</TableCell>
-                    <TableCell>
-                      <Badge variant={record.status === "success" ? "default" : record.status === "error" ? "destructive" : "secondary"}>
-                        {record.status || "unknown"}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
+                  <>
+                    <TableRow key={record.id || index}>
+                      <TableCell className="text-sm">
+                        {record.completed_at || record.started_at
+                          ? new Date(record.completed_at || record.started_at || "").toLocaleString()
+                          : "—"}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {[record.source_type, record.segment_type].filter(Boolean).join(" / ") || "—"}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {record.status === "failed"
+                          ? "—"
+                          : `${record.records_added ?? 0} / ${record.records_fetched ?? 0}`}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant={record.status === "completed" ? "default" : record.status === "failed" ? "destructive" : "secondary"}>
+                          {record.status || "unknown"}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                    {record.status === "failed" && record.error_message && (
+                      <TableRow key={`${record.id || index}-error`}>
+                        <TableCell colSpan={4} className="text-sm text-destructive bg-destructive/5 py-2 px-4">
+                          {record.error_message}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </>
                 ))}
               </TableBody>
             </Table>

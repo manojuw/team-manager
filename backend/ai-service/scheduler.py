@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 from datetime import datetime, timezone
@@ -10,6 +11,13 @@ from vector_ops import VectorOps
 from encryption import decrypt_config
 
 logger = logging.getLogger(__name__)
+
+UUID_PATTERN = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.IGNORECASE
+)
+DOMAIN_PATTERN = re.compile(
+    r'^[a-zA-Z0-9][a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -69,6 +77,9 @@ class SyncScheduler:
 
                 ds_cfg = ds_config if isinstance(ds_config, dict) else (json.loads(ds_config) if ds_config else {})
 
+                if connector_type == 'microsoft_teams' and not self._validate_teams_config(actual_config, ds_id):
+                    continue
+
                 logger.info(f"Auto-syncing data source {ds_id} (connector={connector_id}, type={connector_type}/{source_type})")
                 try:
                     if connector_type == 'microsoft_teams':
@@ -83,16 +94,35 @@ class SyncScheduler:
         except Exception as e:
             logger.error(f"Sync checker error: {e}")
 
+    def _validate_teams_config(self, config: dict, ds_id: str) -> bool:
+        client_id = config.get("client_id", "")
+        client_secret = config.get("client_secret", "")
+        azure_tenant_id = config.get("tenant_id", "")
+
+        if not all([client_id, client_secret, azure_tenant_id]):
+            logger.warning(f"Connector for data source {ds_id} missing credentials, skipping")
+            return False
+
+        if client_secret == "••••••••" or len(client_secret) < 8:
+            logger.warning(f"Connector for data source {ds_id} has masked/invalid client_secret, skipping")
+            return False
+
+        if not (UUID_PATTERN.match(azure_tenant_id) or DOMAIN_PATTERN.match(azure_tenant_id)):
+            logger.warning(f"Connector for data source {ds_id} has invalid tenant_id '{azure_tenant_id}', skipping (must be a GUID or domain)")
+            return False
+
+        if not UUID_PATTERN.match(client_id):
+            logger.warning(f"Connector for data source {ds_id} has invalid client_id '{client_id}', skipping (must be a GUID)")
+            return False
+
+        return True
+
     def _sync_teams_data_source(self, ds_id: str, connector_id: str, project_id: str,
                                  tenant_id: str, source_type: str, ds_config: dict,
                                  connector_config: dict):
         client_id = connector_config.get("client_id", "")
         client_secret = connector_config.get("client_secret", "")
         azure_tenant_id = connector_config.get("tenant_id", "")
-
-        if not all([client_id, client_secret, azure_tenant_id]):
-            logger.warning(f"Connector for data source {ds_id} missing credentials, skipping")
-            return
 
         client = TeamsClient(client_id, client_secret, azure_tenant_id)
 
