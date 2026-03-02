@@ -9,6 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from teams_client import TeamsClient
 from vector_ops import VectorOps
 from encryption import decrypt_config
+from transcript_processor import process_transcripts
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,11 @@ class SyncScheduler:
                     since = None
 
             messages = client.get_channel_messages(team_id, channel_id, since=since)
+
+            base_url = f"teams/{team_id}/channels/{channel_id}"
+            transcript_msgs = process_transcripts(messages, client, base_url)
+            messages.extend(transcript_msgs)
+
             added = self.vector_ops.add_messages(
                 messages, "microsoft_teams", "team_channel", source_identifier,
                 project_id, tenant_id, connector_id, ds_id
@@ -172,6 +178,11 @@ class SyncScheduler:
                     since = None
 
             messages = client.get_chat_messages(chat_id, since=since)
+
+            base_url = f"chats/{chat_id}"
+            transcript_msgs = process_transcripts(messages, client, base_url)
+            messages.extend(transcript_msgs)
+
             added = self.vector_ops.add_messages(
                 messages, "microsoft_teams", "group_chat", source_identifier,
                 project_id, tenant_id, connector_id, ds_id

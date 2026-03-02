@@ -47,10 +47,12 @@ Follows SOLID principles with clean separation of concerns:
 
 ### AI Service Files
 - `backend/ai-service/main.py` — FastAPI endpoints for Teams sync, search, Q&A (uses connector_id for credentials)
-- `backend/ai-service/teams_client.py` — Microsoft Graph API client
+- `backend/ai-service/teams_client.py` — Microsoft Graph API client (with VTT attachment detection, meeting event detection, transcript fetch)
 - `backend/ai-service/vector_ops.py` — pgvector operations with connector_id + data_source_id tracking
 - `backend/ai-service/scheduler.py` — Background sync scheduler (iterates data_source rows, joins connector for credentials)
 - `backend/ai-service/encryption.py` — Python decryption utility for encrypted configs
+- `backend/ai-service/vtt_parser.py` — WebVTT parser (speaker extraction, timestamp parsing, segment grouping)
+- `backend/ai-service/transcript_processor.py` — Orchestrates transcript ingestion from VTT attachments and meeting events
 
 ## Database Schema (all table names are singular)
 - `tenant` — Multi-tenant organizations (id uuid, name, created_at)
@@ -83,6 +85,15 @@ Follows SOLID principles with clean separation of concerns:
 ## Required Azure AD Permissions
 - `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`
 - `Chat.Read.All` (for group chats), `User.Read.All` (for user discovery)
+- `OnlineMeetingTranscript.Read.All` (optional, for auto-fetching Teams meeting transcripts — requires admin policy)
+
+## Transcript Ingestion
+Two transcript sources are supported during sync:
+1. **VTT file attachments**: Any `.vtt` file shared in a chat or channel is auto-detected, downloaded, parsed, and indexed
+2. **Teams meeting events**: Meeting recording/transcription events are detected; transcript content is fetched via Graph API (requires `OnlineMeetingTranscript.Read.All` — gracefully skipped if unavailable)
+- VTT parsing handles `<v Speaker>` tags, `Speaker: text` prefixes, and standard WebVTT cue blocks
+- Consecutive segments by the same speaker are grouped (up to ~500 chars) for embedding quality
+- Transcript entries stored with `message_type: "transcript"` in semantic_data
 
 ## Dependencies
 - **Backend (NestJS)**: @nestjs/core, @nestjs/typeorm, typeorm, @nestjs/jwt, passport-jwt, bcryptjs, class-validator, pg
@@ -99,6 +110,9 @@ Follows SOLID principles with clean separation of concerns:
 - 2026-03-02: Added manual "Sync Now" button per data source on Connectors page
 - 2026-03-02: Fixed sync scheduler to validate credentials before attempting sync (skips invalid connectors)
 - 2026-03-02: Fixed Knowledge Base sync history table to show correct fields, status badges, and error messages
+- 2026-03-02: Added meeting transcript ingestion — auto-detects VTT file attachments and Teams meeting recording events during sync
+- 2026-03-02: Created VTT parser (vtt_parser.py) with speaker extraction, timestamp parsing, and segment grouping for quality embeddings
+- 2026-03-02: Added transcript_processor.py to orchestrate VTT download + parsing + meeting transcript fetch from Graph API
 - 2026-02-23: Renamed all tables to singular (tenant, user, project, connector, data_source, semantic_data, sync_history)
 - 2026-02-23: Added AES-256-GCM encryption for connector secrets with secrets_updated_at tracking
 - 2026-02-23: Replaced teams_messages with generic semantic_data table (source_type, segment_type, source_identifier JSONB)

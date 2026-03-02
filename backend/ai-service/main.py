@@ -18,6 +18,7 @@ from vector_ops import VectorOps
 from ai_ops import ask_question_ai, summarize_ai
 from scheduler import SyncScheduler
 from encryption import decrypt_config
+from transcript_processor import process_transcripts
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -209,6 +210,11 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
             since = None
 
     messages = client.get_channel_messages(req.team_id, req.channel_id, since=since)
+
+    base_url = f"teams/{req.team_id}/channels/{req.channel_id}"
+    transcript_msgs = process_transcripts(messages, client, base_url)
+    messages.extend(transcript_msgs)
+
     added = vector_ops.add_messages(
         messages, "microsoft_teams", "team_channel", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
@@ -221,13 +227,15 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
         _update_data_source_last_sync(req.data_source_id)
 
     replies_count = sum(1 for m in messages if m.get("message_type") == "reply")
-    posts_count = len(messages) - replies_count
+    transcript_count = sum(1 for m in messages if m.get("message_type") == "transcript")
+    posts_count = len(messages) - replies_count - transcript_count
 
     return {
         "added": added,
         "total_fetched": len(messages),
         "posts": posts_count,
         "replies": replies_count,
+        "transcripts": transcript_count,
     }
 
 
@@ -250,6 +258,11 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
             since = None
 
     messages = client.get_chat_messages(req.chat_id, since=since)
+
+    base_url = f"chats/{req.chat_id}"
+    transcript_msgs = process_transcripts(messages, client, base_url)
+    messages.extend(transcript_msgs)
+
     added = vector_ops.add_messages(
         messages, "microsoft_teams", "group_chat", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
@@ -261,7 +274,8 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
     if req.data_source_id:
         _update_data_source_last_sync(req.data_source_id)
 
-    return {"added": added, "total_fetched": len(messages)}
+    transcript_count = sum(1 for m in messages if m.get("message_type") == "transcript")
+    return {"added": added, "total_fetched": len(messages), "transcripts": transcript_count}
 
 
 @app.post("/api/search")

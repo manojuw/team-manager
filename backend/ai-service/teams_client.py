@@ -1,4 +1,5 @@
 import logging
+import re
 import msal
 import requests
 import time
@@ -8,6 +9,47 @@ logger = logging.getLogger(__name__)
 
 
 GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
+GRAPH_API_BETA = "https://graph.microsoft.com/beta"
+
+MEETING_EVENT_TYPES = {
+    "#microsoft.graph.callRecordingEventMessageDetail",
+    "#microsoft.graph.callTranscriptionEventMessageDetail",
+}
+
+VTT_EXTENSIONS = {".vtt", ".webvtt"}
+
+
+def _is_vtt_attachment(att: dict) -> bool:
+    name = (att.get("name") or "").lower()
+    content_type = (att.get("contentType") or "").lower()
+    return any(name.endswith(ext) for ext in VTT_EXTENSIONS) or "text/vtt" in content_type
+
+
+def _extract_html_text(content: str) -> str:
+    content = re.sub(r"<[^>]+>", " ", content)
+    content = re.sub(r"\s+", " ", content).strip()
+    return content
+
+
+def _extract_sender(msg: dict) -> str:
+    sender = msg.get("from", {})
+    user_info = sender.get("user", {}) if sender else {}
+    return user_info.get("displayName", "Unknown") if user_info else "System"
+
+
+def _extract_attachments(msg: dict) -> list:
+    attachments = msg.get("attachments", [])
+    result = []
+    for att in attachments:
+        info = {
+            "name": att.get("name", ""),
+            "content_type": att.get("contentType", ""),
+            "content_url": att.get("contentUrl", ""),
+            "id": att.get("id", ""),
+        }
+        info["is_vtt"] = _is_vtt_attachment(info)
+        result.append(info)
+    return result
 
 
 class TeamsClient:
@@ -52,6 +94,13 @@ class TeamsClient:
         )
         response.raise_for_status()
         return response.json()
+
+    def _get_raw(self, url: str) -> bytes:
+        self._ensure_token()
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        return response.content
 
     def _get_all_pages(
         self, url: str, params: dict = None, max_pages: int = 50, advanced_query: bool = False
@@ -114,33 +163,43 @@ class TeamsClient:
                     pass
 
             if is_new_message:
+                event_detail = msg.get("eventDetail")
+                if event_detail:
+                    event_type = event_detail.get("@odata.type", "")
+                    if event_type in MEETING_EVENT_TYPES:
+                        results.append({
+                            "id": msg_id,
+                            "content": "",
+                            "sender": _extract_sender(msg),
+                            "created_at": created,
+                            "attachments": [],
+                            "message_type": "meeting_event",
+                            "event_detail": event_detail,
+                        })
+
                 body = msg.get("body", {})
                 content = body.get("content", "")
                 content_type = body.get("contentType", "text")
 
                 if content_type == "html":
-                    import re
-                    content = re.sub(r"<[^>]+>", " ", content)
-                    content = re.sub(r"\s+", " ", content).strip()
+                    content = _extract_html_text(content)
 
-                sender = msg.get("from", {})
-                user_info = sender.get("user", {}) if sender else {}
-                sender_name = user_info.get("displayName", "Unknown") if user_info else "System"
-
-                attachments = msg.get("attachments", [])
-                attachment_info = []
-                for att in attachments:
-                    attachment_info.append({
-                        "name": att.get("name", ""),
-                        "content_type": att.get("contentType", ""),
-                        "content_url": att.get("contentUrl", ""),
-                    })
+                attachment_info = _extract_attachments(msg)
 
                 if content.strip():
                     results.append({
                         "id": msg_id,
                         "content": content,
-                        "sender": sender_name,
+                        "sender": _extract_sender(msg),
+                        "created_at": created,
+                        "attachments": attachment_info,
+                        "message_type": msg.get("messageType", "message"),
+                    })
+                elif attachment_info:
+                    results.append({
+                        "id": msg_id,
+                        "content": f"[Attachment: {', '.join(a['name'] for a in attachment_info if a['name'])}]",
+                        "sender": _extract_sender(msg),
                         "created_at": created,
                         "attachments": attachment_info,
                         "message_type": msg.get("messageType", "message"),
@@ -174,21 +233,15 @@ class TeamsClient:
             content_type = body.get("contentType", "text")
 
             if content_type == "html":
-                import re
-                content = re.sub(r"<[^>]+>", " ", content)
-                content = re.sub(r"\s+", " ", content).strip()
-
-            sender = reply.get("from", {})
-            user_info = sender.get("user", {}) if sender else {}
-            sender_name = user_info.get("displayName", "Unknown") if user_info else "System"
+                content = _extract_html_text(content)
 
             if content.strip():
                 results.append({
                     "id": reply.get("id", ""),
                     "content": content,
-                    "sender": sender_name,
+                    "sender": _extract_sender(reply),
                     "created_at": reply.get("createdDateTime", ""),
-                    "attachments": [],
+                    "attachments": _extract_attachments(reply),
                     "message_type": "reply",
                     "parent_message_id": message_id,
                 })
@@ -267,6 +320,8 @@ class TeamsClient:
         results = []
         for msg in messages:
             created = msg.get("createdDateTime", "")
+            msg_id = msg.get("id", "")
+
             if since and created:
                 try:
                     msg_time = datetime.fromisoformat(created.replace("Z", "+00:00"))
@@ -275,27 +330,94 @@ class TeamsClient:
                 except (ValueError, TypeError):
                     pass
 
+            event_detail = msg.get("eventDetail")
+            if event_detail:
+                event_type = event_detail.get("@odata.type", "")
+                if event_type in MEETING_EVENT_TYPES:
+                    results.append({
+                        "id": msg_id,
+                        "content": "",
+                        "sender": _extract_sender(msg),
+                        "created_at": created,
+                        "attachments": [],
+                        "message_type": "meeting_event",
+                        "event_detail": event_detail,
+                    })
+
             body = msg.get("body", {})
             content = body.get("content", "")
             content_type = body.get("contentType", "text")
 
             if content_type == "html":
-                import re
-                content = re.sub(r"<[^>]+>", " ", content)
-                content = re.sub(r"\s+", " ", content).strip()
+                content = _extract_html_text(content)
 
-            sender = msg.get("from", {})
-            user_info = sender.get("user", {}) if sender else {}
-            sender_name = user_info.get("displayName", "Unknown") if user_info else "System"
+            attachment_info = _extract_attachments(msg)
 
             if content.strip():
                 results.append({
-                    "id": msg.get("id", ""),
+                    "id": msg_id,
                     "content": content,
-                    "sender": sender_name,
+                    "sender": _extract_sender(msg),
                     "created_at": created,
-                    "attachments": [],
+                    "attachments": attachment_info,
+                    "message_type": msg.get("messageType", "message"),
+                })
+            elif attachment_info:
+                results.append({
+                    "id": msg_id,
+                    "content": f"[Attachment: {', '.join(a['name'] for a in attachment_info if a['name'])}]",
+                    "sender": _extract_sender(msg),
+                    "created_at": created,
+                    "attachments": attachment_info,
                     "message_type": msg.get("messageType", "message"),
                 })
 
         return results
+
+    def download_attachment_content(self, content_url: str) -> bytes:
+        try:
+            return self._get_raw(content_url)
+        except Exception as e:
+            logger.warning(f"Failed to download attachment from {content_url}: {e}")
+            return b""
+
+    def download_hosted_content(self, chat_or_team_url: str, message_id: str,
+                                 hosted_content_id: str) -> bytes:
+        url = f"{GRAPH_API_BASE}/{chat_or_team_url}/messages/{message_id}/hostedContents/{hosted_content_id}/$value"
+        try:
+            return self._get_raw(url)
+        except Exception as e:
+            logger.warning(f"Failed to download hosted content: {e}")
+            return b""
+
+    def get_meeting_transcript(self, meeting_id: str) -> str:
+        try:
+            url = f"{GRAPH_API_BASE}/communications/onlineMeetings/{meeting_id}/transcripts"
+            data = self._get(url)
+            transcripts = data.get("value", [])
+            if not transcripts:
+                logger.info(f"No transcripts found for meeting {meeting_id}")
+                return ""
+
+            transcript_id = transcripts[0].get("id", "")
+            if not transcript_id:
+                return ""
+
+            content_url = f"{GRAPH_API_BASE}/communications/onlineMeetings/{meeting_id}/transcripts/{transcript_id}/content"
+            self._ensure_token()
+            headers = {
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "text/vtt",
+            }
+            response = requests.get(content_url, headers=headers)
+            response.raise_for_status()
+            return response.text
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code in (403, 401):
+                logger.warning(f"No permission to access transcript for meeting {meeting_id} (need OnlineMeetingTranscript.Read.All)")
+            else:
+                logger.warning(f"Failed to fetch transcript for meeting {meeting_id}: {e}")
+            return ""
+        except Exception as e:
+            logger.warning(f"Failed to fetch transcript for meeting {meeting_id}: {e}")
+            return ""
