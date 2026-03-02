@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 import psycopg2
 import psycopg2.extras
+import requests
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -20,7 +21,7 @@ from ai_ops import ask_question_ai, summarize_ai
 from scheduler import SyncScheduler
 from encryption import decrypt_config
 from transcript_processor import process_transcripts
-from azure_devops_client import AzureDevOpsClient
+from azure_devops_client import AzureDevOpsClient, DevOpsApiError
 from devops_sync import fetch_devops_work_items_as_messages
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
@@ -323,59 +324,92 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
 
 @app.post("/api/devops/list-projects")
 def list_devops_projects(req: ListDevOpsProjectsRequest, user=Depends(verify_token)):
-    client = _get_devops_client(req.connector_id, user["tenantId"])
-    projects = client.get_projects()
-    return {"projects": projects}
+    try:
+        client = _get_devops_client(req.connector_id, user["tenantId"])
+        projects = client.get_projects()
+        return {"projects": projects}
+    except DevOpsApiError as e:
+        logger.error(f"[DevOps] list-projects error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except requests.exceptions.HTTPError as e:
+        body = e.response.text if e.response is not None else ""
+        logger.error(f"[DevOps] list-projects HTTP error: {e} body={body}")
+        raise HTTPException(status_code=400, detail=f"{e} — Response: {body[:500]}")
+    except Exception as e:
+        logger.error(f"[DevOps] list-projects unexpected error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/devops/list-iterations")
 def list_devops_iterations(req: ListDevOpsIterationsRequest, user=Depends(verify_token)):
-    client = _get_devops_client(req.connector_id, user["tenantId"])
-    iterations = client.get_iterations(req.devops_project)
-    return {"iterations": iterations}
+    try:
+        client = _get_devops_client(req.connector_id, user["tenantId"])
+        iterations = client.get_iterations(req.devops_project)
+        return {"iterations": iterations}
+    except DevOpsApiError as e:
+        logger.error(f"[DevOps] list-iterations error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except requests.exceptions.HTTPError as e:
+        body = e.response.text if e.response is not None else ""
+        logger.error(f"[DevOps] list-iterations HTTP error: {e} body={body}")
+        raise HTTPException(status_code=400, detail=f"{e} — Response: {body[:500]}")
+    except Exception as e:
+        logger.error(f"[DevOps] list-iterations unexpected error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/sync/devops-project")
 def sync_devops_project(req: SyncDevOpsProjectRequest, user=Depends(verify_token)):
-    tenant_id = user["tenantId"]
-    client = _get_devops_client(req.connector_id, tenant_id)
+    try:
+        tenant_id = user["tenantId"]
+        client = _get_devops_client(req.connector_id, tenant_id)
 
-    source_identifier = {
-        "organization": client.organization,
-        "project_name": req.devops_project,
-        "project_id": req.devops_project_id or "",
-    }
+        source_identifier = {
+            "organization": client.organization,
+            "project_name": req.devops_project,
+            "project_id": req.devops_project_id or "",
+        }
 
-    last_sync = vector_ops.get_last_sync(req.data_source_id)
-    since = None
-    if last_sync != "Never":
-        try:
-            since = datetime.fromisoformat(last_sync)
-        except (ValueError, TypeError):
-            since = None
+        last_sync = vector_ops.get_last_sync(req.data_source_id)
+        since = None
+        if last_sync != "Never":
+            try:
+                since = datetime.fromisoformat(last_sync)
+            except (ValueError, TypeError):
+                since = None
 
-    messages = fetch_devops_work_items_as_messages(client, req.devops_project, since)
+        messages = fetch_devops_work_items_as_messages(client, req.devops_project, since)
 
-    added = vector_ops.add_messages(
-        messages, "azure_devops", "devops_project", source_identifier,
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
+        added = vector_ops.add_messages(
+            messages, "azure_devops", "devops_project", source_identifier,
+            req.project_id, tenant_id, req.connector_id, req.data_source_id
+        )
 
-    _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
-                         added, len(messages), "azure_devops", "devops_project")
+        _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                             added, len(messages), "azure_devops", "devops_project")
 
-    if req.data_source_id:
-        _update_data_source_last_sync(req.data_source_id)
+        if req.data_source_id:
+            _update_data_source_last_sync(req.data_source_id)
 
-    work_items_count = sum(1 for m in messages if m.get("message_type") == "work_item")
-    comments_count = sum(1 for m in messages if m.get("message_type") == "work_item_comment")
+        work_items_count = sum(1 for m in messages if m.get("message_type") == "work_item")
+        comments_count = sum(1 for m in messages if m.get("message_type") == "work_item_comment")
 
-    return {
-        "added": added,
-        "total_fetched": len(messages),
-        "work_items": work_items_count,
-        "comments": comments_count,
-    }
+        return {
+            "added": added,
+            "total_fetched": len(messages),
+            "work_items": work_items_count,
+            "comments": comments_count,
+        }
+    except DevOpsApiError as e:
+        logger.error(f"[DevOps] sync-devops-project error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except requests.exceptions.HTTPError as e:
+        body = e.response.text if e.response is not None else ""
+        logger.error(f"[DevOps] sync-devops-project HTTP error: {e} body={body}")
+        raise HTTPException(status_code=400, detail=f"{e} — Response: {body[:500]}")
+    except Exception as e:
+        logger.error(f"[DevOps] sync-devops-project unexpected error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/devops/stats/{project_id}")

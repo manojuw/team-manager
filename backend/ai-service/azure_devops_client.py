@@ -11,6 +11,18 @@ DEVOPS_API_VERSION = "7.0"
 DEVOPS_SCOPE = "499b84ac-1321-427f-aa17-267ca6975798/.default"
 
 
+def _mask(value: str, visible: int = 6) -> str:
+    if not value:
+        return "(empty)"
+    if len(value) <= visible:
+        return "***"
+    return value[:visible] + "***"
+
+
+class DevOpsApiError(Exception):
+    pass
+
+
 class AzureDevOpsClient:
     def __init__(self, organization: str, auth_type: str = "pat",
                  pat: str = None, client_id: str = None,
@@ -26,56 +38,112 @@ class AzureDevOpsClient:
         self.token_expiry = 0
         self._msal_app = None
 
+        logger.info(f"[DevOps] Initializing client: org={organization}, auth_type={auth_type}")
+        if auth_type == "azure_ad":
+            logger.info(f"[DevOps] Azure AD config: tenant_id={_mask(tenant_id or '')}, client_id={_mask(client_id or '')}")
+            authority = f"https://login.microsoftonline.com/{self.tenant_id}"
+            logger.info(f"[DevOps] Authority URL: {authority}")
+
         if auth_type == "azure_ad" and client_id and client_secret and tenant_id:
-            self._msal_app = msal.ConfidentialClientApplication(
-                client_id=self.client_id,
-                client_credential=self.client_secret,
-                authority=f"https://login.microsoftonline.com/{self.tenant_id}",
-            )
+            try:
+                self._msal_app = msal.ConfidentialClientApplication(
+                    client_id=self.client_id,
+                    client_credential=self.client_secret,
+                    authority=authority,
+                )
+                logger.info("[DevOps] MSAL ConfidentialClientApplication created successfully")
+            except ValueError as e:
+                logger.error(f"[DevOps] MSAL init failed: {e}")
+                raise DevOpsApiError(
+                    f"Invalid Azure AD Tenant ID '{_mask(tenant_id)}' — "
+                    f"tenant not found or unreachable. "
+                    f"Verify your Tenant ID in Azure Portal > Azure Active Directory > Overview. "
+                    f"Detail: {e}"
+                )
+        elif auth_type == "pat":
+            logger.info(f"[DevOps] PAT auth configured: pat={_mask(pat or '')}")
 
     def _ensure_token(self):
         if self.auth_type == "pat":
             return
         if self.access_token and time.time() < self.token_expiry - 60:
+            logger.debug("[DevOps] Reusing cached Azure AD token")
             return
         if not self._msal_app:
-            raise Exception("Azure AD auth requires client_id, client_secret, and tenant_id")
+            raise DevOpsApiError("Azure AD auth requires client_id, client_secret, and tenant_id")
+        logger.info(f"[DevOps] Acquiring token from Azure AD, scope={DEVOPS_SCOPE}")
         result = self._msal_app.acquire_token_for_client(scopes=[DEVOPS_SCOPE])
         if "access_token" in result:
             self.access_token = result["access_token"]
             self.token_expiry = time.time() + result.get("expires_in", 3600)
+            logger.info(f"[DevOps] Token acquired successfully, expires_in={result.get('expires_in', '?')}s, token={_mask(self.access_token)}")
         else:
             error = result.get("error_description", result.get("error", "Unknown error"))
-            raise Exception(f"Failed to acquire Azure DevOps token: {error}")
+            logger.error(f"[DevOps] Token acquisition FAILED: {result}")
+            raise DevOpsApiError(
+                f"Azure AD authentication failed — {error}. "
+                f"Check your client_id and client_secret are correct."
+            )
 
     def _headers(self):
         if self.auth_type == "pat":
             encoded = base64.b64encode(f":{self.pat}".encode("utf-8")).decode("utf-8")
+            logger.debug(f"[DevOps] Using PAT auth: Basic {_mask(encoded)}")
             return {
                 "Authorization": f"Basic {encoded}",
                 "Content-Type": "application/json",
             }
         else:
             self._ensure_token()
+            logger.debug(f"[DevOps] Using Bearer auth: {_mask(self.access_token)}")
             return {
                 "Authorization": f"Bearer {self.access_token}",
                 "Content-Type": "application/json",
             }
 
+    def _handle_response_error(self, response, method, url):
+        if response.status_code >= 400:
+            body = ""
+            try:
+                body = response.text
+            except Exception:
+                pass
+            logger.error(f"[DevOps] {method} {url} -> HTTP {response.status_code}: {body}")
+            if response.status_code == 401:
+                raise DevOpsApiError(
+                    f"401 Unauthorized for {url}. "
+                    f"Response: {body[:500]}. "
+                    f"Ensure the service principal / PAT has access to Azure DevOps org '{self.organization}'. "
+                    f"For Azure AD: add the app as a user in DevOps Organization Settings > Users. "
+                    f"For PAT: verify the token is valid and has 'Work Items (Read)' and 'Project and Team (Read)' scopes."
+                )
+            elif response.status_code == 403:
+                raise DevOpsApiError(
+                    f"403 Forbidden for {url}. "
+                    f"Response: {body[:500]}. "
+                    f"The credentials are valid but lack permissions. "
+                    f"Ensure the service principal / user has at least Reader access to the project."
+                )
+            response.raise_for_status()
+
     def _get(self, url: str, params: dict = None) -> dict:
         if params is None:
             params = {}
         params.setdefault("api-version", DEVOPS_API_VERSION)
+        logger.info(f"[DevOps] GET {url} params={params}")
         response = requests.get(url, headers=self._headers(), params=params)
-        response.raise_for_status()
+        logger.info(f"[DevOps] GET {url} -> {response.status_code}")
+        self._handle_response_error(response, "GET", url)
         return response.json()
 
     def _post(self, url: str, json_body: dict = None, params: dict = None) -> dict:
         if params is None:
             params = {}
         params.setdefault("api-version", DEVOPS_API_VERSION)
+        logger.info(f"[DevOps] POST {url} params={params} body={json_body}")
         response = requests.post(url, headers=self._headers(), params=params, json=json_body)
-        response.raise_for_status()
+        logger.info(f"[DevOps] POST {url} -> {response.status_code}")
+        self._handle_response_error(response, "POST", url)
         return response.json()
 
     def _get_all_pages(self, url: str, params: dict = None, max_pages: int = 50) -> list:
@@ -86,12 +154,14 @@ class AzureDevOpsClient:
         params.setdefault("api-version", DEVOPS_API_VERSION)
 
         while url and page < max_pages:
+            logger.info(f"[DevOps] GET (page {page}) {url} params={params}")
             response = requests.get(
                 url,
                 headers=self._headers(),
                 params=params if page == 0 else {"api-version": DEVOPS_API_VERSION},
             )
-            response.raise_for_status()
+            logger.info(f"[DevOps] GET (page {page}) {url} -> {response.status_code}")
+            self._handle_response_error(response, "GET", url)
             data = response.json()
             all_items.extend(data.get("value", []))
             continuation_token = response.headers.get("x-ms-continuationtoken")
@@ -105,6 +175,7 @@ class AzureDevOpsClient:
             else:
                 url = None
             page += 1
+        logger.info(f"[DevOps] Paginated fetch complete: {len(all_items)} items")
         return all_items
 
     def get_projects(self) -> list:
