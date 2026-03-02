@@ -173,20 +173,26 @@ class VectorOps:
         return results
 
     def get_stats(self, project_id: str, tenant_id: str) -> dict:
-        stats = {"total_records": 0, "source_types": [], "segment_types": [], "teams": [], "channels": []}
+        stats = {"total_messages": 0, "unique_teams": 0, "unique_channels": 0, "unique_senders": 0}
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT COUNT(*) FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["total_records"] = cur.fetchone()[0]
-                    cur.execute("SELECT DISTINCT source_type FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["source_types"] = [row[0] for row in cur.fetchall()]
-                    cur.execute("SELECT DISTINCT segment_type FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["segment_types"] = [row[0] for row in cur.fetchall()]
-                    cur.execute("SELECT DISTINCT source_identifier->>'team_name' FROM semantic_data WHERE source_identifier->>'team_name' IS NOT NULL AND project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["teams"] = [row[0] for row in cur.fetchall() if row[0]]
-                    cur.execute("SELECT DISTINCT source_identifier->>'channel_name' FROM semantic_data WHERE source_identifier->>'channel_name' IS NOT NULL AND project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    stats["channels"] = [row[0] for row in cur.fetchall() if row[0]]
+                    cur.execute(
+                        """SELECT
+                             COUNT(*),
+                             COUNT(DISTINCT source_identifier->>'team_name') FILTER (WHERE source_identifier->>'team_name' IS NOT NULL),
+                             COUNT(DISTINCT source_identifier->>'channel_name') FILTER (WHERE source_identifier->>'channel_name' IS NOT NULL),
+                             COUNT(DISTINCT sender) FILTER (WHERE sender IS NOT NULL)
+                           FROM semantic_data
+                           WHERE project_id = %s AND tenant_id = %s""",
+                        (project_id, tenant_id),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        stats["total_messages"] = row[0] or 0
+                        stats["unique_teams"] = row[1] or 0
+                        stats["unique_channels"] = row[2] or 0
+                        stats["unique_senders"] = row[3] or 0
         except Exception as e:
             logger.error(f"Stats query failed: {e}")
         return stats
