@@ -1,21 +1,22 @@
 # Teams Knowledge Base
 
 ## Overview
-A multi-tenant knowledge base application that connects to Microsoft Teams via the Microsoft Graph API, extracts conversations from selected channels and group chats, indexes them in a PostgreSQL + pgvector database, and provides AI-powered Q&A. Features multi-tenancy with login/signup, per-tenant data isolation, and background data ingestion on configurable intervals.
+A multi-tenant knowledge base application that connects to Microsoft Teams and Azure DevOps, extracts conversations, work items, and meeting transcripts, indexes them in a PostgreSQL + pgvector database, and provides AI-powered Q&A. Features multi-tenancy with login/signup, per-tenant data isolation, and background data ingestion on configurable intervals.
 
 ## Architecture
 - **Frontend**: Next.js 14 + shadcn/ui (port 5001, proxied through port 5000)
 - **Management API**: NestJS with TypeORM (port 3001) — handles auth, projects, connectors, data sources, sync
-- **AI Service**: FastAPI + Python (port 8001) — handles Teams API calls, vector operations, AI Q&A
+- **AI Service**: FastAPI + Python (port 8001) — handles Teams API calls, Azure DevOps API, vector operations, AI Q&A
 - **Proxy**: Python reverse proxy on port 5000 routes traffic to all services
 - **Database**: PostgreSQL + pgvector (Replit built-in)
 - **Embeddings**: fastembed BAAI/bge-small-en-v1.5 (384 dimensions, local)
 - **AI**: OpenAI via Replit AI Integrations
 
 ## Data Hierarchy
-- **Connector**: Top-level connection config (e.g., Microsoft Teams with Azure AD credentials). Stores encrypted credentials.
-- **Data Source**: Individual syncable segment under a connector (e.g., one Teams channel, one group chat). Has its own sync settings (interval, enabled, last_sync_at).
+- **Connector**: Top-level connection config (e.g., Microsoft Teams with Azure AD credentials, or Azure DevOps with PAT/Azure AD). Stores encrypted credentials.
+- **Data Source**: Individual syncable segment under a connector (e.g., one Teams channel, one group chat, or one DevOps project). Has its own sync settings (interval, enabled, last_sync_at).
 - One connector can have many data sources.
+- **Connector Types**: `microsoft_teams` (Teams channels/chats), `azure_devops` (DevOps projects/work items)
 
 ## Backend Architecture (NestJS)
 Follows SOLID principles with clean separation of concerns:
@@ -48,6 +49,8 @@ Follows SOLID principles with clean separation of concerns:
 ### AI Service Files
 - `backend/ai-service/main.py` — FastAPI endpoints for Teams sync, search, Q&A (uses connector_id for credentials)
 - `backend/ai-service/teams_client.py` — Microsoft Graph API client (with VTT attachment detection, meeting event detection, transcript fetch)
+- `backend/ai-service/azure_devops_client.py` — Azure DevOps REST API client (PAT + Azure AD auth, work items, comments, iterations)
+- `backend/ai-service/devops_sync.py` — Converts DevOps work items + comments into indexable messages
 - `backend/ai-service/vector_ops.py` — pgvector operations with connector_id + data_source_id tracking
 - `backend/ai-service/scheduler.py` — Background sync scheduler (iterates data_source rows, joins connector for credentials)
 - `backend/ai-service/encryption.py` — Python decryption utility for encrypted configs
@@ -114,6 +117,12 @@ Two transcript sources are supported during sync:
 - 2026-03-02: Added meeting transcript ingestion — auto-detects VTT file attachments and Teams meeting recording events during sync
 - 2026-03-02: Created VTT parser (vtt_parser.py) with speaker extraction, timestamp parsing, and segment grouping for quality embeddings
 - 2026-03-02: Added transcript_processor.py to orchestrate VTT download + parsing + meeting transcript fetch from Graph API
+- 2026-03-02: Added Azure DevOps connector type with PAT and Azure AD authentication
+- 2026-03-02: Created azure_devops_client.py with work items, comments, iterations, and project listing
+- 2026-03-02: Added DevOps sync flow — fetches work items (all types) and comments, indexes as searchable content
+- 2026-03-02: Added DevOps dashboard page (/dashboard/devops) with stats, sprint progress, and work item breakdown
+- 2026-03-02: Updated AI prompt to cross-reference Teams conversations with Azure DevOps work items
+- 2026-03-02: Added devops_sync.py shared module for work item message conversion (used by both API and scheduler)
 - 2026-02-23: Renamed all tables to singular (tenant, user, project, connector, data_source, semantic_data, sync_history)
 - 2026-02-23: Added AES-256-GCM encryption for connector secrets with secrets_updated_at tracking
 - 2026-02-23: Replaced teams_messages with generic semantic_data table (source_type, segment_type, source_identifier JSONB)

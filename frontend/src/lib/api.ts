@@ -98,6 +98,19 @@ export const teams = {
     fetchWithAuth(`${AI_API}/sync/group-chat`, { method: "POST", body: JSON.stringify(data) }),
 };
 
+export const devops = {
+  listProjects: (connectorId: string) =>
+    fetchWithAuth(`${AI_API}/devops/list-projects`, { method: "POST", body: JSON.stringify({ connector_id: connectorId }) }),
+  listIterations: (connectorId: string, projectName: string) =>
+    fetchWithAuth(`${AI_API}/devops/list-iterations`, { method: "POST", body: JSON.stringify({ connector_id: connectorId, project_name: projectName }) }),
+  syncProject: (data: { project_id: string; connector_id: string; data_source_id?: string; devops_project_id: string; devops_project_name: string }) =>
+    fetchWithAuth(`${AI_API}/sync/devops-project`, { method: "POST", body: JSON.stringify(data) }),
+};
+
+export const devopsStats = {
+  get: (projectId: string) => fetchWithAuth(`${AI_API}/devops/stats/${projectId}`),
+};
+
 export const ai = {
   search: (data: { project_id: string; query: string; n_results?: number; filter_team?: string; filter_channel?: string }) =>
     fetchWithAuth(`${AI_API}/search`, { method: "POST", body: JSON.stringify(data) }),

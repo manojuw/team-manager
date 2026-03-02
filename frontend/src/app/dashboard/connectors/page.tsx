@@ -7,7 +7,7 @@ import { toast } from "sonner";
 import { z } from "zod";
 
 import { useProject } from "@/hooks/use-project";
-import { connectors, dataSources, teams, sync } from "@/lib/api";
+import { connectors, dataSources, teams, devops, sync } from "@/lib/api";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -53,6 +53,8 @@ import {
   Users,
   XCircle,
   Database,
+  GitBranch,
+  FolderKanban,
 } from "lucide-react";
 
 const teamsConfigSchema = z.object({
@@ -61,6 +63,22 @@ const teamsConfigSchema = z.object({
   client_secret: z.string().min(1, "Client Secret is required"),
 });
 type TeamsConfigForm = z.infer<typeof teamsConfigSchema>;
+
+const devopsConfigSchema = z.object({
+  organization: z.string().min(1, "Organization name is required"),
+  auth_type: z.enum(["pat", "azure_ad"]),
+  pat: z.string().optional(),
+  tenant_id: z.string().optional(),
+  client_id: z.string().optional(),
+  client_secret: z.string().optional(),
+}).refine(
+  (data) => {
+    if (data.auth_type === "pat") return !!data.pat && data.pat.length > 0;
+    return !!data.tenant_id && !!data.client_id && !!data.client_secret;
+  },
+  { message: "Please provide the required credentials for your chosen auth type", path: ["auth_type"] }
+);
+type DevOpsConfigForm = z.infer<typeof devopsConfigSchema>;
 
 interface Connector {
   id: string;
@@ -106,8 +124,16 @@ interface GroupChat {
   members?: Array<{ displayName?: string; userId?: string }>;
 }
 
+interface DevOpsProject {
+  id: string;
+  name: string;
+  description?: string;
+  state?: string;
+}
+
 const CONNECTOR_TYPES = [
   { value: "microsoft_teams", label: "Microsoft Teams", icon: MessageSquare },
+  { value: "azure_devops", label: "Azure DevOps", icon: GitBranch },
 ];
 
 const SYNC_INTERVALS = [
@@ -135,6 +161,13 @@ export default function ConnectorsPage() {
     resolver: zodResolver(teamsConfigSchema),
     defaultValues: { tenant_id: "", client_id: "", client_secret: "" },
   });
+
+  const addDevOpsForm = useForm<DevOpsConfigForm>({
+    resolver: zodResolver(devopsConfigSchema),
+    defaultValues: { organization: "", auth_type: "pat", pat: "", tenant_id: "", client_id: "", client_secret: "" },
+  });
+
+  const devopsAuthType = addDevOpsForm.watch("auth_type");
 
   const updateForm = useForm<TeamsConfigForm>({
     resolver: zodResolver(teamsConfigSchema),
@@ -164,7 +197,7 @@ export default function ConnectorsPage() {
     try {
       await connectors.create({
         projectId: currentProject.id,
-        name: connectorName || `${connectorType === "microsoft_teams" ? "Microsoft Teams" : connectorType} Connector`,
+        name: connectorName || "Microsoft Teams Connector",
         connectorType: connectorType,
         config: {
           tenant_id: values.tenant_id,
@@ -174,6 +207,39 @@ export default function ConnectorsPage() {
       });
       toast.success("Connector created");
       addForm.reset();
+      setConnectorName("");
+      setAddDialogOpen(false);
+      await fetchConnectors();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create connector");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  async function onAddDevOpsConnector(values: DevOpsConfigForm) {
+    if (!currentProject) return;
+    setCreating(true);
+    try {
+      const config: Record<string, string> = {
+        organization: values.organization,
+        auth_type: values.auth_type,
+      };
+      if (values.auth_type === "pat") {
+        config.pat = values.pat || "";
+      } else {
+        config.tenant_id = values.tenant_id || "";
+        config.client_id = values.client_id || "";
+        config.client_secret = values.client_secret || "";
+      }
+      await connectors.create({
+        projectId: currentProject.id,
+        name: connectorName || "Azure DevOps Connector",
+        connectorType: "azure_devops",
+        config,
+      });
+      toast.success("Connector created");
+      addDevOpsForm.reset();
       setConnectorName("");
       setAddDialogOpen(false);
       await fetchConnectors();
@@ -251,10 +317,10 @@ export default function ConnectorsPage() {
             <DialogHeader>
               <DialogTitle>Add Connector</DialogTitle>
             </DialogHeader>
-            <form onSubmit={addForm.handleSubmit(onAddConnector)} className="space-y-4">
+            <div className="space-y-4">
               <div className="space-y-2">
                 <Label>Connector Type</Label>
-                <Select value={connectorType} onValueChange={setConnectorType}>
+                <Select value={connectorType} onValueChange={(val) => { setConnectorType(val); addForm.reset(); addDevOpsForm.reset(); }}>
                   <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {CONNECTOR_TYPES.map((t) => (
@@ -267,14 +333,14 @@ export default function ConnectorsPage() {
                 <Label htmlFor="connector-name">Name</Label>
                 <Input
                   id="connector-name"
-                  placeholder="e.g. Production Teams"
+                  placeholder={connectorType === "azure_devops" ? "e.g. My DevOps Org" : "e.g. Production Teams"}
                   value={connectorName}
                   onChange={(e) => setConnectorName(e.target.value)}
                 />
               </div>
               <Separator />
               {connectorType === "microsoft_teams" && (
-                <>
+                <form onSubmit={addForm.handleSubmit(onAddConnector)} className="space-y-4">
                   <div className="space-y-2">
                     <Label htmlFor="add-tenant-id">Azure Tenant ID</Label>
                     <Input id="add-tenant-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" {...addForm.register("tenant_id")} />
@@ -290,12 +356,57 @@ export default function ConnectorsPage() {
                     <Input id="add-client-secret" type="password" placeholder="Enter client secret" {...addForm.register("client_secret")} />
                     {addForm.formState.errors.client_secret && <p className="text-sm text-destructive">{addForm.formState.errors.client_secret.message}</p>}
                   </div>
-                </>
+                  <DialogFooter>
+                    <Button type="submit" disabled={creating}>{creating ? "Creating..." : "Create Connector"}</Button>
+                  </DialogFooter>
+                </form>
               )}
-              <DialogFooter>
-                <Button type="submit" disabled={creating}>{creating ? "Creating..." : "Create Connector"}</Button>
-              </DialogFooter>
-            </form>
+              {connectorType === "azure_devops" && (
+                <form onSubmit={addDevOpsForm.handleSubmit(onAddDevOpsConnector)} className="space-y-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="add-org">Organization</Label>
+                    <Input id="add-org" placeholder="my-organization" {...addDevOpsForm.register("organization")} />
+                    {addDevOpsForm.formState.errors.organization && <p className="text-sm text-destructive">{addDevOpsForm.formState.errors.organization.message}</p>}
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Authentication Type</Label>
+                    <Select value={devopsAuthType} onValueChange={(val: "pat" | "azure_ad") => addDevOpsForm.setValue("auth_type", val)}>
+                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="pat">Personal Access Token (PAT)</SelectItem>
+                        <SelectItem value="azure_ad">Azure AD (Service Principal)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {addDevOpsForm.formState.errors.auth_type && <p className="text-sm text-destructive">{addDevOpsForm.formState.errors.auth_type.message}</p>}
+                  </div>
+                  {devopsAuthType === "pat" && (
+                    <div className="space-y-2">
+                      <Label htmlFor="add-pat">Personal Access Token</Label>
+                      <Input id="add-pat" type="password" placeholder="Enter your PAT" {...addDevOpsForm.register("pat")} />
+                    </div>
+                  )}
+                  {devopsAuthType === "azure_ad" && (
+                    <>
+                      <div className="space-y-2">
+                        <Label htmlFor="add-devops-tenant-id">Azure Tenant ID</Label>
+                        <Input id="add-devops-tenant-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" {...addDevOpsForm.register("tenant_id")} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="add-devops-client-id">Client ID</Label>
+                        <Input id="add-devops-client-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" {...addDevOpsForm.register("client_id")} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="add-devops-client-secret">Client Secret</Label>
+                        <Input id="add-devops-client-secret" type="password" placeholder="Enter client secret" {...addDevOpsForm.register("client_secret")} />
+                      </div>
+                    </>
+                  )}
+                  <DialogFooter>
+                    <Button type="submit" disabled={creating}>{creating ? "Creating..." : "Create Connector"}</Button>
+                  </DialogFooter>
+                </form>
+              )}
+            </div>
           </DialogContent>
         </Dialog>
       </div>
@@ -434,10 +545,18 @@ function ConnectorCard({
           chat_id: source.config.chat_id,
           chat_name: source.config.chat_name,
         });
+      } else if (source.source_type === "devops_project") {
+        result = await devops.syncProject({
+          project_id: currentProject.id,
+          connector_id: connector.id,
+          data_source_id: source.id,
+          devops_project_id: source.config.devops_project_id,
+          devops_project_name: source.config.devops_project_name,
+        });
       }
       const added = result?.added ?? 0;
       const fetched = result?.total_fetched ?? 0;
-      toast.success(`Sync complete: ${added} new messages added (${fetched} fetched)`);
+      toast.success(`Sync complete: ${added} new items added (${fetched} fetched)`);
       await fetchSources();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Sync failed");
@@ -524,6 +643,13 @@ function ConnectorCard({
                   </Button>
                 </div>
               )}
+              {connector.connector_type === "azure_devops" && (
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setAddSourceType("devops_project")}>
+                    <FolderKanban className="size-3" /> Add DevOps Project
+                  </Button>
+                </div>
+              )}
             </div>
 
             {loadingSources ? (
@@ -535,7 +661,11 @@ function ConnectorCard({
               <div className="text-center py-8 text-muted-foreground">
                 <Database className="size-8 mx-auto mb-2 opacity-50" />
                 <p className="text-sm">No data sources added yet</p>
-                <p className="text-xs mt-1">Add channels or group chats to start syncing</p>
+                <p className="text-xs mt-1">
+                  {connector.connector_type === "azure_devops"
+                    ? "Add DevOps projects to start syncing work items"
+                    : "Add channels or group chats to start syncing"}
+                </p>
               </div>
             ) : (
               <div className="space-y-2">
@@ -543,13 +673,15 @@ function ConnectorCard({
                   <div key={source.id} className="flex items-center gap-3 rounded-md border px-4 py-3">
                     {source.source_type === "team_channel" ? (
                       <Hash className="size-4 text-muted-foreground shrink-0" />
+                    ) : source.source_type === "devops_project" ? (
+                      <FolderKanban className="size-4 text-muted-foreground shrink-0" />
                     ) : (
                       <MessageSquare className="size-4 text-muted-foreground shrink-0" />
                     )}
                     <div className="flex-1 min-w-0">
                       <div className="font-medium text-sm truncate">{source.name}</div>
                       <div className="text-xs text-muted-foreground">
-                        {source.source_type === "team_channel" ? "Channel" : "Group Chat"}
+                        {source.source_type === "team_channel" ? "Channel" : source.source_type === "devops_project" ? "DevOps Project" : "Group Chat"}
                         <span className="ml-2">
                           {source.last_sync_at
                             ? `Last synced: ${new Date(source.last_sync_at).toLocaleString()}`
@@ -622,6 +754,14 @@ function ConnectorCard({
             )}
             {addSourceType === "group_chat" && (
               <AddGroupChatSources
+                connectorId={connector.id}
+                projectId={currentProject.id}
+                onClose={() => setAddSourceType(null)}
+                onAdded={fetchSources}
+              />
+            )}
+            {addSourceType === "devops_project" && (
+              <AddDevOpsProjectSources
                 connectorId={connector.id}
                 projectId={currentProject.id}
                 onClose={() => setAddSourceType(null)}
@@ -948,6 +1088,124 @@ function AddGroupChatSources({
             <div className="flex items-center justify-between">
               <span className="text-sm text-muted-foreground">{selectedChatIds.size} selected</span>
               <Button size="sm" disabled={selectedChatIds.size === 0 || adding} onClick={addSelected}>
+                {adding ? <><Loader2 className="size-3 animate-spin" /> Adding...</> : <><Plus className="size-3" /> Add Selected</>}
+              </Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function AddDevOpsProjectSources({
+  connectorId,
+  projectId,
+  onClose,
+  onAdded,
+}: {
+  connectorId: string;
+  projectId: string;
+  onClose: () => void;
+  onAdded: () => void;
+}) {
+  const [projectsList, setProjectsList] = useState<DevOpsProject[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(true);
+  const [selectedProjectIds, setSelectedProjectIds] = useState<Set<string>>(new Set());
+  const [adding, setAdding] = useState(false);
+
+  useEffect(() => {
+    async function fetchProjects() {
+      try {
+        const data = await devops.listProjects(connectorId);
+        setProjectsList(data.projects || []);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : "Failed to load DevOps projects");
+      } finally {
+        setLoadingProjects(false);
+      }
+    }
+    fetchProjects();
+  }, [connectorId]);
+
+  function toggleProject(id: string) {
+    setSelectedProjectIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  }
+
+  async function addSelected() {
+    const selected = projectsList.filter((p) => selectedProjectIds.has(p.id));
+    if (selected.length === 0) return;
+    setAdding(true);
+    let added = 0;
+    for (const project of selected) {
+      try {
+        await dataSources.create({
+          connectorId,
+          name: project.name,
+          sourceType: "devops_project",
+          config: {
+            devops_project_id: project.id,
+            devops_project_name: project.name,
+          },
+        });
+        added++;
+      } catch (error) {
+        toast.error(`Failed to add ${project.name}`);
+      }
+    }
+    if (added > 0) {
+      toast.success(`Added ${added} DevOps project(s)`);
+      onAdded();
+    }
+    setAdding(false);
+    onClose();
+  }
+
+  return (
+    <Card className="border-dashed">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="text-sm flex items-center gap-2">
+            <FolderKanban className="size-4" /> Add DevOps Projects
+          </CardTitle>
+          <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {loadingProjects ? (
+          <div className="space-y-2">
+            {[1, 2, 3].map((i) => <Skeleton key={i} className="h-8 w-full" />)}
+          </div>
+        ) : projectsList.length === 0 ? (
+          <div className="text-center py-4 text-muted-foreground">
+            <p className="text-sm">No projects found in this organization</p>
+          </div>
+        ) : (
+          <>
+            <div className="space-y-1 max-h-48 overflow-y-auto rounded-md border p-2">
+              {projectsList.map((project) => (
+                <label key={project.id} className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent/50 cursor-pointer">
+                  <Checkbox
+                    checked={selectedProjectIds.has(project.id)}
+                    onCheckedChange={() => toggleProject(project.id)}
+                  />
+                  <FolderKanban className="size-3 text-muted-foreground" />
+                  <div className="min-w-0">
+                    <span className="text-sm font-medium block truncate">{project.name}</span>
+                    {project.description && (
+                      <span className="text-xs text-muted-foreground block truncate">{project.description}</span>
+                    )}
+                  </div>
+                </label>
+              ))}
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-muted-foreground">{selectedProjectIds.size} selected</span>
+              <Button size="sm" disabled={selectedProjectIds.size === 0 || adding} onClick={addSelected}>
                 {adding ? <><Loader2 className="size-3 animate-spin" /> Adding...</> : <><Plus className="size-3" /> Add Selected</>}
               </Button>
             </div>

@@ -13,12 +13,15 @@ from pydantic import BaseModel
 from typing import Optional
 import jwt
 
+import re as re_module
 from teams_client import TeamsClient
 from vector_ops import VectorOps
 from ai_ops import ask_question_ai, summarize_ai
 from scheduler import SyncScheduler
 from encryption import decrypt_config
 from transcript_processor import process_transcripts
+from azure_devops_client import AzureDevOpsClient
+from devops_sync import fetch_devops_work_items_as_messages
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -120,6 +123,23 @@ class ListGroupChatsRequest(BaseModel):
     user_ids: list[str]
 
 
+class ListDevOpsProjectsRequest(BaseModel):
+    connector_id: str
+
+
+class ListDevOpsIterationsRequest(BaseModel):
+    connector_id: str
+    devops_project: str
+
+
+class SyncDevOpsProjectRequest(BaseModel):
+    project_id: str
+    connector_id: str
+    data_source_id: Optional[str] = None
+    devops_project: str
+    devops_project_id: Optional[str] = None
+
+
 def _get_connector_config(connector_id: str, tenant_id: str) -> dict:
     conn = psycopg2.connect(DATABASE_URL)
     try:
@@ -154,6 +174,29 @@ def _get_teams_client(connector_id: str, tenant_id: str) -> TeamsClient:
     if not all([client_id, client_secret, azure_tenant_id]):
         raise HTTPException(status_code=400, detail="Connector credentials not configured")
     return TeamsClient(client_id, client_secret, azure_tenant_id)
+
+
+def _get_devops_client(connector_id: str, tenant_id: str) -> AzureDevOpsClient:
+    config = _get_connector_config(connector_id, tenant_id)
+    organization = config.get("organization", "")
+    if not organization:
+        raise HTTPException(status_code=400, detail="Azure DevOps organization not configured")
+    auth_type = config.get("auth_type", "pat")
+    if auth_type == "pat":
+        pat = config.get("pat", "")
+        if not pat:
+            raise HTTPException(status_code=400, detail="Personal Access Token not configured")
+        return AzureDevOpsClient(organization=organization, auth_type="pat", pat=pat)
+    else:
+        client_id = config.get("client_id", "")
+        client_secret = config.get("client_secret", "")
+        azure_tenant_id = config.get("tenant_id", "")
+        if not all([client_id, client_secret, azure_tenant_id]):
+            raise HTTPException(status_code=400, detail="Azure AD credentials not configured")
+        return AzureDevOpsClient(
+            organization=organization, auth_type="azure_ad",
+            client_id=client_id, client_secret=client_secret, tenant_id=azure_tenant_id
+        )
 
 
 @app.get("/api/health")
@@ -276,6 +319,99 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
 
     transcript_count = sum(1 for m in messages if m.get("message_type") == "transcript")
     return {"added": added, "total_fetched": len(messages), "transcripts": transcript_count}
+
+
+@app.post("/api/devops/list-projects")
+def list_devops_projects(req: ListDevOpsProjectsRequest, user=Depends(verify_token)):
+    client = _get_devops_client(req.connector_id, user["tenantId"])
+    projects = client.get_projects()
+    return {"projects": projects}
+
+
+@app.post("/api/devops/list-iterations")
+def list_devops_iterations(req: ListDevOpsIterationsRequest, user=Depends(verify_token)):
+    client = _get_devops_client(req.connector_id, user["tenantId"])
+    iterations = client.get_iterations(req.devops_project)
+    return {"iterations": iterations}
+
+
+@app.post("/api/sync/devops-project")
+def sync_devops_project(req: SyncDevOpsProjectRequest, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    client = _get_devops_client(req.connector_id, tenant_id)
+
+    source_identifier = {
+        "organization": client.organization,
+        "project_name": req.devops_project,
+        "project_id": req.devops_project_id or "",
+    }
+
+    last_sync = vector_ops.get_last_sync(req.data_source_id)
+    since = None
+    if last_sync != "Never":
+        try:
+            since = datetime.fromisoformat(last_sync)
+        except (ValueError, TypeError):
+            since = None
+
+    messages = fetch_devops_work_items_as_messages(client, req.devops_project, since)
+
+    added = vector_ops.add_messages(
+        messages, "azure_devops", "devops_project", source_identifier,
+        req.project_id, tenant_id, req.connector_id, req.data_source_id
+    )
+
+    _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                         added, len(messages), "azure_devops", "devops_project")
+
+    if req.data_source_id:
+        _update_data_source_last_sync(req.data_source_id)
+
+    work_items_count = sum(1 for m in messages if m.get("message_type") == "work_item")
+    comments_count = sum(1 for m in messages if m.get("message_type") == "work_item_comment")
+
+    return {
+        "added": added,
+        "total_fetched": len(messages),
+        "work_items": work_items_count,
+        "comments": comments_count,
+    }
+
+
+@app.get("/api/devops/stats/{project_id}")
+def get_devops_stats(project_id: str, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    stats = {
+        "total_work_items": 0,
+        "by_type": {},
+        "by_state": {},
+        "total_comments": 0,
+    }
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT content, message_type FROM semantic_data
+                       WHERE project_id = %s AND tenant_id = %s AND source_type = 'azure_devops'""",
+                    (project_id, tenant_id),
+                )
+                rows = cur.fetchall()
+                for content, msg_type in rows:
+                    if msg_type == "work_item":
+                        stats["total_work_items"] += 1
+                        type_match = re_module.search(r'\[Type: ([^\]]+)\]', content or "")
+                        state_match = re_module.search(r'\[State: ([^\]]+)\]', content or "")
+                        if type_match:
+                            t = type_match.group(1)
+                            stats["by_type"][t] = stats["by_type"].get(t, 0) + 1
+                        if state_match:
+                            s = state_match.group(1)
+                            stats["by_state"][s] = stats["by_state"].get(s, 0) + 1
+                    elif msg_type == "work_item_comment":
+                        stats["total_comments"] += 1
+    except Exception as e:
+        logger.error(f"DevOps stats query failed: {e}")
+    return stats
 
 
 @app.post("/api/search")

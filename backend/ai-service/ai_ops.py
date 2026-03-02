@@ -22,17 +22,22 @@ def is_rate_limit_error(exception: BaseException) -> bool:
     )
 
 
-SYSTEM_PROMPT = """You are an AI assistant that answers questions about Microsoft Teams conversations and project discussions.
+SYSTEM_PROMPT = """You are an AI assistant that answers questions about project knowledge including Microsoft Teams conversations, Azure DevOps work items, and meeting transcripts.
 
-You have access to relevant conversation excerpts from Microsoft Teams channels. Use them to answer questions accurately.
+You have access to relevant context from multiple sources:
+- **Teams conversations**: Messages from channels and group chats
+- **Azure DevOps work items**: User stories, tasks, bugs, features, and their comments/discussions
+- **Meeting transcripts**: Parsed VTT transcripts from recorded meetings
 
 Guidelines:
 - Answer based ONLY on the provided context. If the information is not in the context, say so clearly.
-- When referencing team members, use their names as they appear in the messages.
+- When referencing team members, use their names as they appear in the messages or work items.
 - When discussing commitments or promises, quote the relevant message and attribute it to the person who said it.
 - Include dates and timestamps when relevant to show when things were discussed.
-- If asked about project status, summarize the most recent relevant discussions.
-- Be specific and cite the conversations you're referencing.
+- If asked about project status, combine insights from both conversations and work items.
+- When work items and conversations discuss the same topic, cross-reference them to provide a complete picture.
+- For work items, reference the work item ID (e.g., #12345) and its current state.
+- Be specific and cite the sources you're referencing (conversation, work item, or transcript).
 - If multiple people discussed the same topic, summarize all perspectives.
 - Format your response clearly with sections if the answer covers multiple points.
 """
@@ -45,14 +50,20 @@ Guidelines:
     reraise=True,
 )
 def ask_question_ai(question: str, context_results: list, chat_history: list = None) -> str:
-    context_text = "\n\n".join(
-        [
-            f"--- Message (Team: {r['metadata'].get('team', 'N/A')}, "
-            f"Channel: {r['metadata'].get('channel', 'N/A')}, "
-            f"Relevance: {r['relevance']:.2f}) ---\n{r['content']}"
-            for r in context_results
-        ]
-    )
+    context_parts = []
+    for r in context_results:
+        meta = r.get("metadata", {})
+        source_type = meta.get("source_type", "")
+        if source_type == "azure_devops":
+            header = f"--- DevOps Work Item (Relevance: {r['relevance']:.2f}) ---"
+        else:
+            header = (
+                f"--- Message (Team: {meta.get('team', 'N/A')}, "
+                f"Channel: {meta.get('channel', 'N/A')}, "
+                f"Relevance: {r['relevance']:.2f}) ---"
+            )
+        context_parts.append(f"{header}\n{r['content']}")
+    context_text = "\n\n".join(context_parts)
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
@@ -60,14 +71,14 @@ def ask_question_ai(question: str, context_results: list, chat_history: list = N
         for entry in chat_history[-10:]:
             messages.append({"role": entry["role"], "content": entry["content"]})
 
-    user_message = f"""Based on the following Teams conversations, please answer this question:
+    user_message = f"""Based on the following context (conversations, work items, and transcripts), please answer this question:
 
 **Question:** {question}
 
-**Relevant Conversations:**
+**Relevant Context:**
 {context_text}
 
-Please provide a comprehensive answer based on the conversations above."""
+Please provide a comprehensive answer based on the context above."""
 
     messages.append({"role": "user", "content": user_message})
 

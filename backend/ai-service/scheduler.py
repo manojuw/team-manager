@@ -10,6 +10,7 @@ from teams_client import TeamsClient
 from vector_ops import VectorOps
 from encryption import decrypt_config
 from transcript_processor import process_transcripts
+from azure_devops_client import AzureDevOpsClient
 
 logger = logging.getLogger(__name__)
 
@@ -80,12 +81,17 @@ class SyncScheduler:
 
                 if connector_type == 'microsoft_teams' and not self._validate_teams_config(actual_config, ds_id):
                     continue
+                if connector_type == 'azure_devops' and not self._validate_devops_config(actual_config, ds_id):
+                    continue
 
                 logger.info(f"Auto-syncing data source {ds_id} (connector={connector_id}, type={connector_type}/{source_type})")
                 try:
                     if connector_type == 'microsoft_teams':
                         self._sync_teams_data_source(ds_id, connector_id, project_id, tenant_id,
                                                      source_type, ds_cfg, actual_config)
+                    elif connector_type == 'azure_devops':
+                        self._sync_devops_data_source(ds_id, connector_id, project_id, tenant_id,
+                                                       source_type, ds_cfg, actual_config)
                     self._update_last_sync(ds_id)
                 except Exception as e:
                     logger.error(f"Auto-sync failed for {ds_id}: {e}")
@@ -191,6 +197,80 @@ class SyncScheduler:
                               added, len(messages), "microsoft_teams", "group_chat")
 
         logger.info(f"Auto-sync complete for data source {ds_id}")
+
+    def _validate_devops_config(self, config: dict, ds_id: str) -> bool:
+        organization = config.get("organization", "")
+        if not organization:
+            logger.warning(f"DevOps connector for data source {ds_id} missing organization, skipping")
+            return False
+
+        auth_type = config.get("auth_type", "pat")
+        if auth_type == "pat":
+            pat = config.get("pat", "")
+            if not pat or pat == "••••••••" or len(pat) < 8:
+                logger.warning(f"DevOps connector for data source {ds_id} has invalid PAT, skipping")
+                return False
+        else:
+            client_id = config.get("client_id", "")
+            client_secret = config.get("client_secret", "")
+            azure_tenant_id = config.get("tenant_id", "")
+            if not all([client_id, client_secret, azure_tenant_id]):
+                logger.warning(f"DevOps connector for data source {ds_id} missing Azure AD credentials, skipping")
+                return False
+            if client_secret == "••••••••" or len(client_secret) < 8:
+                logger.warning(f"DevOps connector for data source {ds_id} has masked/invalid client_secret, skipping")
+                return False
+
+        return True
+
+    def _sync_devops_data_source(self, ds_id: str, connector_id: str, project_id: str,
+                                  tenant_id: str, source_type: str, ds_config: dict,
+                                  connector_config: dict):
+        organization = connector_config.get("organization", "")
+        auth_type = connector_config.get("auth_type", "pat")
+
+        if auth_type == "pat":
+            client = AzureDevOpsClient(organization=organization, auth_type="pat",
+                                        pat=connector_config.get("pat", ""))
+        else:
+            client = AzureDevOpsClient(
+                organization=organization, auth_type="azure_ad",
+                client_id=connector_config.get("client_id", ""),
+                client_secret=connector_config.get("client_secret", ""),
+                tenant_id=connector_config.get("tenant_id", ""),
+            )
+
+        if source_type == "devops_project":
+            devops_project = ds_config.get("devops_project", "")
+            if not devops_project:
+                logger.warning(f"Data source {ds_id} missing devops_project config, skipping")
+                return
+
+            source_identifier = {
+                "organization": organization,
+                "project_name": devops_project,
+                "project_id": ds_config.get("devops_project_id", ""),
+            }
+
+            last_sync = self.vector_ops.get_last_sync(ds_id)
+            since = None
+            if last_sync != "Never":
+                try:
+                    since = datetime.fromisoformat(last_sync)
+                except (ValueError, TypeError):
+                    since = None
+
+            from devops_sync import fetch_devops_work_items_as_messages
+            messages = fetch_devops_work_items_as_messages(client, devops_project, since)
+
+            added = self.vector_ops.add_messages(
+                messages, "azure_devops", "devops_project", source_identifier,
+                project_id, tenant_id, connector_id, ds_id
+            )
+            self._record_sync(tenant_id, project_id, connector_id, ds_id,
+                              added, len(messages), "azure_devops", "devops_project")
+
+        logger.info(f"Auto-sync complete for DevOps data source {ds_id}")
 
     def _update_last_sync(self, ds_id: str):
         try:
