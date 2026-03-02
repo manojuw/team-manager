@@ -198,7 +198,7 @@ class AzureDevOpsClient:
         if wiql_query is None:
             conditions = ["[System.TeamProject] = @project"]
             if since:
-                since_str = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+                since_str = since.strftime("%Y-%m-%d")
                 conditions.append(f"[System.ChangedDate] >= '{since_str}'")
             where_clause = " AND ".join(conditions)
             wiql_query = f"SELECT [System.Id] FROM WorkItems WHERE {where_clause} ORDER BY [System.ChangedDate] DESC"
