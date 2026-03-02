@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useProject } from "@/hooks/use-project";
 import { ai } from "@/lib/api";
 import { toast } from "sonner";
@@ -8,8 +8,6 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Separator } from "@/components/ui/separator";
 import { Send, Bot, User, Loader2, MessageSquare, Sparkles } from "lucide-react";
@@ -17,6 +15,40 @@ import { Send, Bot, User, Loader2, MessageSquare, Sparkles } from "lucide-react"
 interface Message {
   role: string;
   content: string;
+}
+
+interface StoredChat {
+  messages: Message[];
+  savedAt: number;
+}
+
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+function getChatKey(projectId: string) {
+  return `chat-history-${projectId}`;
+}
+
+function loadChat(projectId: string): Message[] {
+  try {
+    const raw = localStorage.getItem(getChatKey(projectId));
+    if (!raw) return [];
+    const stored: StoredChat = JSON.parse(raw);
+    if (Date.now() - stored.savedAt > SEVEN_DAYS_MS) {
+      localStorage.removeItem(getChatKey(projectId));
+      return [];
+    }
+    return stored.messages || [];
+  } catch {
+    return [];
+  }
+}
+
+function saveChat(projectId: string, messages: Message[]) {
+  try {
+    const stored: StoredChat = { messages, savedAt: Date.now() };
+    localStorage.setItem(getChatKey(projectId), JSON.stringify(stored));
+  } catch {
+  }
 }
 
 function renderAIContent(content: string) {
@@ -57,13 +89,33 @@ export default function AskPage() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [summarizing, setSummarizing] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    if (currentProject) {
+      const saved = loadChat(currentProject.id);
+      setMessages(saved);
+    } else {
+      setMessages([]);
     }
-  }, [messages]);
+  }, [currentProject?.id]);
+
+  const scrollToBottom = useCallback(() => {
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    });
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, loading, scrollToBottom]);
+
+  function persistMessages(newMessages: Message[]) {
+    if (currentProject) {
+      saveChat(currentProject.id, newMessages);
+    }
+  }
 
   async function handleSend() {
     if (!currentProject || !input.trim() || loading) return;
@@ -73,6 +125,7 @@ export default function AskPage() {
     const userMessage: Message = { role: "user", content: question };
     const updatedMessages = [...messages, userMessage];
     setMessages(updatedMessages);
+    persistMessages(updatedMessages);
     setLoading(true);
 
     try {
@@ -82,10 +135,14 @@ export default function AskPage() {
         chat_history: updatedMessages,
       });
       const answer = data.answer || data.response || data.content || "No response received.";
-      setMessages((prev) => [...prev, { role: "assistant", content: answer }]);
+      const withAnswer = [...updatedMessages, { role: "assistant", content: answer }];
+      setMessages(withAnswer);
+      persistMessages(withAnswer);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to get response");
-      setMessages((prev) => [...prev, { role: "assistant", content: "Sorry, I encountered an error. Please try again." }]);
+      const withError = [...updatedMessages, { role: "assistant", content: "Sorry, I encountered an error. Please try again." }];
+      setMessages(withError);
+      persistMessages(withError);
     } finally {
       setLoading(false);
     }
@@ -97,10 +154,9 @@ export default function AskPage() {
     try {
       const data = await ai.summarize(currentProject.id);
       const summary = data.summary || data.content || data.answer || "No summary available.";
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: summary },
-      ]);
+      const updated = [...messages, { role: "assistant", content: summary }];
+      setMessages(updated);
+      persistMessages(updated);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to summarize");
     } finally {
@@ -110,6 +166,9 @@ export default function AskPage() {
 
   function handleClearChat() {
     setMessages([]);
+    if (currentProject) {
+      localStorage.removeItem(getChatKey(currentProject.id));
+    }
   }
 
   if (!currentProject) {
@@ -132,8 +191,8 @@ export default function AskPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col" style={{ height: "calc(100vh - 120px)" }}>
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Ask Questions</h1>
           <p className="text-muted-foreground">
@@ -163,11 +222,12 @@ export default function AskPage() {
         </div>
       </div>
 
-      <Separator />
-
-      <Card className="flex flex-col" style={{ height: "calc(100vh - 280px)" }}>
-        <CardContent className="flex-1 flex flex-col p-0 overflow-hidden">
-          <ScrollArea className="flex-1 p-6" ref={scrollRef}>
+      <Card className="flex-1 flex flex-col min-h-0">
+        <CardContent className="flex-1 flex flex-col p-0 min-h-0">
+          <div
+            ref={scrollContainerRef}
+            className="flex-1 overflow-y-auto p-6"
+          >
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-center">
                 <Sparkles className="size-12 text-muted-foreground mb-4" />
@@ -183,7 +243,7 @@ export default function AskPage() {
                     key={index}
                     className={`flex gap-3 ${message.role === "user" ? "flex-row-reverse" : "flex-row"}`}
                   >
-                    <Avatar className="shrink-0">
+                    <Avatar className="shrink-0 mt-1">
                       <AvatarFallback>
                         {message.role === "user" ? (
                           <User className="size-4" />
@@ -193,10 +253,10 @@ export default function AskPage() {
                       </AvatarFallback>
                     </Avatar>
                     <div
-                      className={`rounded-lg px-4 py-3 max-w-[80%] text-sm ${
+                      className={`rounded-lg px-4 py-3 text-sm break-words ${
                         message.role === "user"
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-muted"
+                          ? "bg-primary text-primary-foreground max-w-[80%]"
+                          : "bg-muted flex-1 min-w-0"
                       }`}
                     >
                       {message.role === "assistant" ? (
@@ -211,7 +271,7 @@ export default function AskPage() {
                 ))}
                 {loading && (
                   <div className="flex gap-3">
-                    <Avatar className="shrink-0">
+                    <Avatar className="shrink-0 mt-1">
                       <AvatarFallback>
                         <Bot className="size-4" />
                       </AvatarFallback>
@@ -224,9 +284,10 @@ export default function AskPage() {
                     </div>
                   </div>
                 )}
+                <div ref={messagesEndRef} />
               </div>
             )}
-          </ScrollArea>
+          </div>
 
           <div className="border-t p-4">
             <form
