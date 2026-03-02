@@ -241,9 +241,9 @@ class SyncScheduler:
             )
 
         if source_type == "devops_project":
-            devops_project = ds_config.get("devops_project", "")
+            devops_project = ds_config.get("devops_project_name", ds_config.get("devops_project", ""))
             if not devops_project:
-                logger.warning(f"Data source {ds_id} missing devops_project config, skipping")
+                logger.warning(f"Data source {ds_id} missing devops_project_name config, skipping")
                 return
 
             source_identifier = {

@@ -137,7 +137,7 @@ class SyncDevOpsProjectRequest(BaseModel):
     project_id: str
     connector_id: str
     data_source_id: Optional[str] = None
-    devops_project: str
+    devops_project_name: str
     devops_project_id: Optional[str] = None
 
 
@@ -366,7 +366,7 @@ def sync_devops_project(req: SyncDevOpsProjectRequest, user=Depends(verify_token
 
         source_identifier = {
             "organization": client.organization,
-            "project_name": req.devops_project,
+            "project_name": req.devops_project_name,
             "project_id": req.devops_project_id or "",
         }
 
@@ -378,7 +378,7 @@ def sync_devops_project(req: SyncDevOpsProjectRequest, user=Depends(verify_token
             except (ValueError, TypeError):
                 since = None
 
-        messages = fetch_devops_work_items_as_messages(client, req.devops_project, since)
+        messages = fetch_devops_work_items_as_messages(client, req.devops_project_name, since)
 
         added = vector_ops.add_messages(
             messages, "azure_devops", "devops_project", source_identifier,
