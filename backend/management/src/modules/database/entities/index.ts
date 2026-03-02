@@ -5,4 +5,3 @@ export { Connector } from './connector.entity';
 export { DataSource } from './data-source.entity';
 export { SemanticData } from './semantic-data.entity';
 export { SyncHistory } from './sync-history.entity';
-export { SyncMetadata } from './sync-metadata.entity';

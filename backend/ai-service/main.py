@@ -200,9 +200,7 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
         "channel_name": req.channel_name,
     }
 
-    last_sync = vector_ops.get_last_sync(
-        "microsoft_teams", "team_channel", source_identifier, req.project_id, tenant_id
-    )
+    last_sync = vector_ops.get_last_sync(req.data_source_id)
     since = None
     if last_sync != "Never":
         try:
@@ -213,10 +211,6 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
     messages = client.get_channel_messages(req.team_id, req.channel_id, since=since)
     added = vector_ops.add_messages(
         messages, "microsoft_teams", "team_channel", source_identifier,
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
-    vector_ops.update_sync_time(
-        "microsoft_teams", "team_channel", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
 
@@ -247,9 +241,7 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
         "chat_name": req.chat_name,
     }
 
-    last_sync = vector_ops.get_last_sync(
-        "microsoft_teams", "group_chat", source_identifier, req.project_id, tenant_id
-    )
+    last_sync = vector_ops.get_last_sync(req.data_source_id)
     since = None
     if last_sync != "Never":
         try:
@@ -260,10 +252,6 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
     messages = client.get_chat_messages(req.chat_id, since=since)
     added = vector_ops.add_messages(
         messages, "microsoft_teams", "group_chat", source_identifier,
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
-    vector_ops.update_sync_time(
-        "microsoft_teams", "group_chat", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
 

@@ -59,7 +59,6 @@ Follows SOLID principles with clean separation of concerns:
 - `connector` — Connection configs per project (id, project_id, name, connector_type, config JSONB masked, encrypted_config JSONB encrypted, secrets_updated_at, tenant_id)
 - `data_source` — Individual syncable segments under a connector (id, connector_id, project_id, tenant_id, name, source_type, config JSONB, sync_interval_minutes, sync_enabled, last_sync_at)
 - `semantic_data` — Generic indexed content (id, tenant_id, project_id, connector_id, data_source_id, source_type, segment_type, source_identifier JSONB, content, embedding vector(384), sender, message_type)
-- `sync_metadata` — Sync tracking per source/segment (id, tenant_id, project_id, connector_id, data_source_id, source_type, segment_type, source_identifier JSONB, last_sync_at)
 - `sync_history` — Sync operation history (id uuid, tenant_id, project_id, connector_id, data_source_id, source_type, segment_type, status, records_added, records_fetched, error_message)
 
 ### Source Types & Segments
@@ -96,7 +95,11 @@ Follows SOLID principles with clean separation of concerns:
 - 2026-02-23: Added credential merge on update — empty fields preserved from existing stored values
 - 2026-02-23: Old pages (data-sources, channels, group-chats) redirect to /dashboard/connectors
 - 2026-02-23: Updated AI service scheduler to iterate individual data_source rows for sync
-- 2026-02-23: Renamed all tables to singular (tenant, user, project, connector, data_source, semantic_data, sync_metadata, sync_history)
+- 2026-03-02: Eliminated sync_metadata table — consolidated sync checkpoint into data_source.last_sync_at
+- 2026-03-02: Added manual "Sync Now" button per data source on Connectors page
+- 2026-03-02: Fixed sync scheduler to validate credentials before attempting sync (skips invalid connectors)
+- 2026-03-02: Fixed Knowledge Base sync history table to show correct fields, status badges, and error messages
+- 2026-02-23: Renamed all tables to singular (tenant, user, project, connector, data_source, semantic_data, sync_history)
 - 2026-02-23: Added AES-256-GCM encryption for connector secrets with secrets_updated_at tracking
 - 2026-02-23: Replaced teams_messages with generic semantic_data table (source_type, segment_type, source_identifier JSONB)
 - 2026-02-23: Rebuilt management API with NestJS, TypeORM, repository pattern, SOLID principles

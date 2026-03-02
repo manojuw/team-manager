@@ -139,9 +139,7 @@ class SyncScheduler:
                 "team_id": team_id, "team_name": team_name,
                 "channel_id": channel_id, "channel_name": channel_name,
             }
-            last_sync = self.vector_ops.get_last_sync(
-                "microsoft_teams", "team_channel", source_identifier, project_id, tenant_id
-            )
+            last_sync = self.vector_ops.get_last_sync(ds_id)
             since = None
             if last_sync != "Never":
                 try:
@@ -152,10 +150,6 @@ class SyncScheduler:
             messages = client.get_channel_messages(team_id, channel_id, since=since)
             added = self.vector_ops.add_messages(
                 messages, "microsoft_teams", "team_channel", source_identifier,
-                project_id, tenant_id, connector_id, ds_id
-            )
-            self.vector_ops.update_sync_time(
-                "microsoft_teams", "team_channel", source_identifier,
                 project_id, tenant_id, connector_id, ds_id
             )
             self._record_sync(tenant_id, project_id, connector_id, ds_id,
@@ -169,9 +163,7 @@ class SyncScheduler:
                 return
 
             source_identifier = {"chat_id": chat_id, "chat_name": chat_name}
-            last_sync = self.vector_ops.get_last_sync(
-                "microsoft_teams", "group_chat", source_identifier, project_id, tenant_id
-            )
+            last_sync = self.vector_ops.get_last_sync(ds_id)
             since = None
             if last_sync != "Never":
                 try:
@@ -182,10 +174,6 @@ class SyncScheduler:
             messages = client.get_chat_messages(chat_id, since=since)
             added = self.vector_ops.add_messages(
                 messages, "microsoft_teams", "group_chat", source_identifier,
-                project_id, tenant_id, connector_id, ds_id
-            )
-            self.vector_ops.update_sync_time(
-                "microsoft_teams", "group_chat", source_identifier,
                 project_id, tenant_id, connector_id, ds_id
             )
             self._record_sync(tenant_id, project_id, connector_id, ds_id,

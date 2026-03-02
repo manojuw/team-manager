@@ -191,36 +191,13 @@ class VectorOps:
             logger.error(f"Stats query failed: {e}")
         return stats
 
-    def update_sync_time(self, source_type: str, segment_type: str,
-                         source_identifier: dict, project_id: str, tenant_id: str,
-                         connector_id: str = None, data_source_id: str = None):
-        source_id_json = json.dumps(source_identifier, sort_keys=True)
-        sync_id = f"sync-{tenant_id}-{project_id}-{hashlib.md5(source_id_json.encode()).hexdigest()}"
-        now = datetime.now(timezone.utc).isoformat()
+    def get_last_sync(self, data_source_id: str) -> str:
+        if not data_source_id:
+            return "Never"
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO sync_metadata
-                           (id, tenant_id, project_id, connector_id, data_source_id,
-                            source_type, segment_type, source_identifier, last_sync_at, updated_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, NOW())
-                           ON CONFLICT (id) DO UPDATE SET last_sync_at = %s, updated_at = NOW()""",
-                        (sync_id, tenant_id, project_id, connector_id, data_source_id,
-                         source_type, segment_type, source_id_json, now, now),
-                    )
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Sync time update failed: {e}")
-
-    def get_last_sync(self, source_type: str, segment_type: str,
-                      source_identifier: dict, project_id: str, tenant_id: str) -> str:
-        source_id_json = json.dumps(source_identifier, sort_keys=True)
-        sync_id = f"sync-{tenant_id}-{project_id}-{hashlib.md5(source_id_json.encode()).hexdigest()}"
-        try:
-            with self._get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT last_sync_at FROM sync_metadata WHERE id = %s", (sync_id,))
+                    cur.execute("SELECT last_sync_at FROM data_source WHERE id = %s", (data_source_id,))
                     row = cur.fetchone()
                     if row and row[0]:
                         return row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0])
@@ -233,7 +210,7 @@ class VectorOps:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
-                    cur.execute("DELETE FROM sync_metadata WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
+                    cur.execute("UPDATE data_source SET last_sync_at = NULL WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
                 conn.commit()
         except Exception as e:
             logger.error(f"Clear project failed: {e}")
