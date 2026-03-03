@@ -11,6 +11,21 @@ from vector_ops import VectorOps
 from encryption import decrypt_config
 from transcript_processor import process_transcripts
 from azure_devops_client import AzureDevOpsClient
+from thread_engine import ThreadEngine
+from message_processor import MessageProcessor
+from audio_processor import AudioProcessor
+from openai import OpenAI as _OpenAI
+
+_audio_processor = AudioProcessor()
+
+
+def _make_openai_client():
+    api_key = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return _OpenAI(**kwargs)
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +175,14 @@ class SyncScheduler:
             transcript_msgs = process_transcripts(messages, client, base_url)
             messages.extend(transcript_msgs)
 
-            added = self.vector_ops.add_messages(
-                messages, "microsoft_teams", "team_channel", source_identifier,
+            openai_client = _make_openai_client()
+            thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
+            threads = thread_engine.group_messages(messages)
+            processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
+            processed_threads = [processor.process_thread(t) for t in threads]
+
+            added = self.vector_ops.add_threads(
+                processed_threads, "microsoft_teams", "team_channel", source_identifier,
                 project_id, tenant_id, connector_id, ds_id
             )
             self._record_sync(tenant_id, project_id, connector_id, ds_id,
@@ -189,8 +210,14 @@ class SyncScheduler:
             transcript_msgs = process_transcripts(messages, client, base_url)
             messages.extend(transcript_msgs)
 
-            added = self.vector_ops.add_messages(
-                messages, "microsoft_teams", "group_chat", source_identifier,
+            openai_client = _make_openai_client()
+            thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
+            threads = thread_engine.group_messages(messages)
+            processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
+            processed_threads = [processor.process_thread(t) for t in threads]
+
+            added = self.vector_ops.add_threads(
+                processed_threads, "microsoft_teams", "group_chat", source_identifier,
                 project_id, tenant_id, connector_id, ds_id
             )
             self._record_sync(tenant_id, project_id, connector_id, ds_id,

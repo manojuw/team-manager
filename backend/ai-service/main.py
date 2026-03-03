@@ -23,6 +23,21 @@ from encryption import decrypt_config
 from transcript_processor import process_transcripts
 from azure_devops_client import AzureDevOpsClient, DevOpsApiError
 from devops_sync import fetch_devops_work_items_as_messages
+from thread_engine import ThreadEngine
+from message_processor import MessageProcessor
+from audio_processor import AudioProcessor
+from openai import OpenAI as _OpenAI
+
+_audio_processor = AudioProcessor()
+
+
+def _make_openai_client():
+    api_key = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
+    kwargs = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return _OpenAI(**kwargs)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -259,8 +274,17 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
     transcript_msgs = process_transcripts(messages, client, base_url)
     messages.extend(transcript_msgs)
 
-    added = vector_ops.add_messages(
-        messages, "microsoft_teams", "team_channel", source_identifier,
+    openai_client = _make_openai_client()
+    thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
+    threads = thread_engine.group_messages(messages)
+
+    processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
+    processed_threads = []
+    for thread in threads:
+        processed_threads.append(processor.process_thread(thread))
+
+    added = vector_ops.add_threads(
+        processed_threads, "microsoft_teams", "team_channel", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
 
@@ -270,16 +294,15 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
     if req.data_source_id:
         _update_data_source_last_sync(req.data_source_id)
 
-    replies_count = sum(1 for m in messages if m.get("message_type") == "reply")
-    transcript_count = sum(1 for m in messages if m.get("message_type") == "transcript")
-    posts_count = len(messages) - replies_count - transcript_count
+    audio_count = sum(1 for t in processed_threads if t.get("has_audio"))
+    video_count = sum(1 for t in processed_threads if t.get("has_video"))
 
     return {
         "added": added,
         "total_fetched": len(messages),
-        "posts": posts_count,
-        "replies": replies_count,
-        "transcripts": transcript_count,
+        "threads": len(processed_threads),
+        "audio_transcribed": audio_count,
+        "video_transcribed": video_count,
     }
 
 
@@ -307,8 +330,17 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
     transcript_msgs = process_transcripts(messages, client, base_url)
     messages.extend(transcript_msgs)
 
-    added = vector_ops.add_messages(
-        messages, "microsoft_teams", "group_chat", source_identifier,
+    openai_client = _make_openai_client()
+    thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
+    threads = thread_engine.group_messages(messages)
+
+    processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
+    processed_threads = []
+    for thread in threads:
+        processed_threads.append(processor.process_thread(thread))
+
+    added = vector_ops.add_threads(
+        processed_threads, "microsoft_teams", "group_chat", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
 
@@ -318,8 +350,16 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
     if req.data_source_id:
         _update_data_source_last_sync(req.data_source_id)
 
-    transcript_count = sum(1 for m in messages if m.get("message_type") == "transcript")
-    return {"added": added, "total_fetched": len(messages), "transcripts": transcript_count}
+    audio_count = sum(1 for t in processed_threads if t.get("has_audio"))
+    video_count = sum(1 for t in processed_threads if t.get("has_video"))
+
+    return {
+        "added": added,
+        "total_fetched": len(messages),
+        "threads": len(processed_threads),
+        "audio_transcribed": audio_count,
+        "video_transcribed": video_count,
+    }
 
 
 @app.post("/api/devops/list-projects")

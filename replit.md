@@ -91,6 +91,15 @@ Follows SOLID principles with clean separation of concerns:
 - `Files.Read.All` (for downloading file attachments shared in chats/channels via SharePoint)
 - `OnlineMeetingTranscript.Read.All` (optional, for auto-fetching Teams meeting transcripts — requires admin policy)
 
+## Thread-Aware Ingestion Pipeline (Teams)
+Teams messages go through a 4-stage pipeline before storage:
+1. **Thread grouping** (`thread_engine.py`): Messages sorted chronologically, grouped by time window (default 60 min) or parent reply. After a gap, OpenAI checks relatedness against the last N threads before creating a new one.
+2. **Content collection** (`message_processor.py`): Per-message content assembled with sender + timestamp. Audio attachments transcribed via SarvamAI; video converted to MP3 first via pydub/ffmpeg, then transcribed.
+3. **Clarification** (`message_processor.py`): Full thread text passed to `gpt-4o-mini` with strict "translate to clear English, preserve every detail, not summarization" prompt. Handles Hindi, Hinglish, and casual slang.
+4. **Embedding + storage** (`vector_ops.py`): Clarified text embedded with OpenAI `text-embedding-3-small` (1536-dim) and stored in the `thread` table.
+
+Azure DevOps data continues to use `add_messages()` → `semantic_data` table (unchanged).
+
 ## Transcript Ingestion
 Two transcript sources are supported during sync:
 1. **VTT file attachments**: Any `.vtt` file shared in a chat or channel is auto-detected, downloaded, parsed, and indexed
@@ -101,10 +110,14 @@ Two transcript sources are supported during sync:
 
 ## Dependencies
 - **Backend (NestJS)**: @nestjs/core, @nestjs/typeorm, typeorm, @nestjs/jwt, passport-jwt, bcryptjs, class-validator, pg
-- **AI Service (Python)**: fastapi, uvicorn, psycopg2-binary, msal, fastembed, openai, cryptography
+- **AI Service (Python)**: fastapi, uvicorn, psycopg2-binary, msal, openai, cryptography, pydub, requests
 - **Frontend**: next, react, @radix-ui/*, tailwindcss, class-variance-authority, react-hook-form, zod
 
 ## Recent Changes
+- 2026-03-03: Completed thread-aware ingestion pipeline for Teams — all sync paths (manual via API and background scheduler) now use thread_engine → message_processor → vector_ops.add_threads()
+- 2026-03-03: All OpenAI clients use lazy initialization with Replit AI Integration credentials (AI_INTEGRATIONS_OPENAI_API_KEY + AI_INTEGRATIONS_OPENAI_BASE_URL) instead of bare OPENAI_API_KEY
+- 2026-03-03: Updated ai_ops.py context formatting to show thread metadata (participants, time range, message count, location)
+- 2026-03-03: Updated AI system prompt to describe thread-based context instead of individual messages
 - 2026-02-23: Restructured to two-level hierarchy: Connector (credentials) → Data Source (individual channels/chats with sync settings)
 - 2026-02-23: Built Connectors page with expandable cards, inline data source management (add channels/group chats)
 - 2026-02-23: Added credential merge on update — empty fields preserved from existing stored values

@@ -4,33 +4,42 @@ import logging
 import json
 import psycopg2
 from datetime import datetime, timezone
-from fastembed import TextEmbedding
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_DIM = 384
+EMBEDDING_DIM = 1536
+EMBEDDING_MODEL = "text-embedding-3-small"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-_embedding_model = None
+_openai_client = None
 
 
-def _get_model():
-    global _embedding_model
-    if _embedding_model is None:
-        _embedding_model = TextEmbedding()
-    return _embedding_model
+def _get_openai():
+    global _openai_client
+    if _openai_client is None:
+        api_key = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        base_url = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
+        kwargs = {"api_key": api_key}
+        if base_url:
+            kwargs["base_url"] = base_url
+        _openai_client = OpenAI(**kwargs)
+    return _openai_client
 
 
 def get_embedding(text: str) -> list:
-    model = _get_model()
-    embeddings = list(model.embed([text]))
-    return embeddings[0].tolist()
+    client = _get_openai()
+    response = client.embeddings.create(model=EMBEDDING_MODEL, input=text[:8000])
+    return response.data[0].embedding
 
 
 def get_embeddings_batch(texts: list) -> list:
-    model = _get_model()
-    embeddings = list(model.embed(texts))
-    return [e.tolist() for e in embeddings]
+    if not texts:
+        return []
+    client = _get_openai()
+    truncated = [t[:8000] for t in texts]
+    response = client.embeddings.create(model=EMBEDDING_MODEL, input=truncated)
+    return [item.embedding for item in response.data]
 
 
 class VectorOps:
@@ -41,6 +50,74 @@ class VectorOps:
         raw = f"{tenant_id}-{project_id}-{message.get('id', '')}-{message.get('created_at', '')}-{message.get('sender', '')}"
         return hashlib.md5(raw.encode()).hexdigest()
 
+    def add_threads(self, threads: list, source_type: str, segment_type: str,
+                    source_identifier: dict, project_id: str, tenant_id: str,
+                    connector_id: str = None, data_source_id: str = None) -> int:
+        if not threads:
+            return 0
+        added = 0
+        source_id_json = json.dumps(source_identifier)
+
+        for thread in threads:
+            clarified = thread.get("clarified_content", "")
+            embedding = thread.get("embedding", [])
+            if not clarified or not embedding:
+                logger.warning("[VectorOps] Skipping thread with missing content or embedding")
+                continue
+
+            raw_messages = thread.get("messages", [])
+            participants = thread.get("participants", [])
+            started_at = thread.get("started_at")
+            last_message_at = thread.get("last_message_at")
+            started_by = raw_messages[0].get("sender", "") if raw_messages else ""
+            message_count = len(raw_messages)
+            has_audio = thread.get("has_audio", False)
+            has_video = thread.get("has_video", False)
+
+            def _dt(v):
+                if v is None:
+                    return None
+                if isinstance(v, datetime):
+                    return v.isoformat()
+                return str(v)
+
+            serializable_messages = []
+            for m in raw_messages:
+                sm = {k: v for k, v in m.items() if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                serializable_messages.append(sm)
+
+            embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+            try:
+                with self._get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO thread
+                               (tenant_id, project_id, connector_id, data_source_id,
+                                source_type, segment_type, source_identifier,
+                                raw_messages, clarified_content, embedding,
+                                started_by, participants, message_count,
+                                has_audio, has_video, started_at, last_message_at)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb,
+                                       %s::jsonb, %s, %s::vector,
+                                       %s, %s::jsonb, %s,
+                                       %s, %s, %s, %s)""",
+                            (
+                                tenant_id, project_id, connector_id, data_source_id,
+                                source_type, segment_type, source_id_json,
+                                json.dumps(serializable_messages), clarified, embedding_str,
+                                started_by, json.dumps(participants), message_count,
+                                has_audio, has_video, _dt(started_at), _dt(last_message_at),
+                            ),
+                        )
+                        added += 1
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"[VectorOps] Failed to insert thread: {e}")
+
+        logger.info(f"[VectorOps] Added {added} threads (project={project_id})")
+        return added
+
     def add_messages(self, messages: list, source_type: str, segment_type: str,
                      source_identifier: dict, project_id: str, tenant_id: str,
                      connector_id: str = None, data_source_id: str = None) -> int:
@@ -50,7 +127,7 @@ class VectorOps:
         batch_size = 50
 
         for i in range(0, len(messages), batch_size):
-            batch = messages[i : i + batch_size]
+            batch = messages[i: i + batch_size]
             new_msgs = []
 
             with self._get_conn() as conn:
@@ -70,7 +147,7 @@ class VectorOps:
             try:
                 embeddings = get_embeddings_batch(texts)
             except Exception as e:
-                logger.error(f"Embedding generation failed: {e}")
+                logger.error(f"[VectorOps] Embedding generation failed: {e}")
                 continue
 
             source_id_json = json.dumps(source_identifier)
@@ -98,17 +175,91 @@ class VectorOps:
                         added += 1
                 conn.commit()
 
-        logger.info(f"Added {added} new records (project={project_id}, tenant={tenant_id})")
+        logger.info(f"[VectorOps] Added {added} records (project={project_id})")
         return added
 
-    def search(self, query: str, n_results: int = 20, filters: dict = None, project_id: str = None, tenant_id: str = None) -> list:
+    def search(self, query: str, n_results: int = 20, filters: dict = None,
+               project_id: str = None, tenant_id: str = None) -> list:
         try:
             query_embedding = get_embedding(query)
         except Exception as e:
-            logger.error(f"Query embedding failed: {e}")
+            logger.error(f"[VectorOps] Query embedding failed: {e}")
             return []
 
         embedding_str = "[" + ",".join(str(x) for x in query_embedding) + "]"
+
+        results = []
+
+        results += self._search_threads(embedding_str, n_results, filters, project_id, tenant_id)
+
+        results += self._search_semantic(embedding_str, n_results, filters, project_id, tenant_id)
+
+        results.sort(key=lambda r: r["relevance"], reverse=True)
+        return results[:n_results]
+
+    def _search_threads(self, embedding_str: str, n_results: int, filters: dict,
+                        project_id: str, tenant_id: str) -> list:
+        where_clauses = []
+        filter_params = []
+
+        if tenant_id:
+            where_clauses.append("tenant_id = %s")
+            filter_params.append(tenant_id)
+        if project_id:
+            where_clauses.append("project_id = %s")
+            filter_params.append(project_id)
+        if filters:
+            if filters.get("source_type"):
+                where_clauses.append("source_type = %s")
+                filter_params.append(filters["source_type"])
+
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+        sql = f"""
+            SELECT clarified_content, started_by, started_at, last_message_at,
+                   source_type, segment_type, source_identifier,
+                   participants, message_count, has_audio, has_video,
+                   1 - (embedding <=> %s::vector) AS relevance
+            FROM thread
+            {where_sql}
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+        """
+        params = [embedding_str] + filter_params + [embedding_str, n_results]
+
+        results = []
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql, params)
+                    for row in cur.fetchall():
+                        source_id = row[6] if isinstance(row[6], dict) else json.loads(row[6]) if row[6] else {}
+                        participants = row[7] if isinstance(row[7], list) else json.loads(row[7]) if row[7] else []
+                        results.append({
+                            "content": row[0],
+                            "metadata": {
+                                "sender": row[1],
+                                "created_at": str(row[2]) if row[2] else "",
+                                "last_message_at": str(row[3]) if row[3] else "",
+                                "source_type": row[4],
+                                "segment_type": row[5],
+                                "source_identifier": source_id,
+                                "team": source_id.get("team_name", ""),
+                                "channel": source_id.get("channel_name", ""),
+                                "participants": participants,
+                                "message_count": row[8],
+                                "has_audio": row[9],
+                                "has_video": row[10],
+                                "result_type": "thread",
+                            },
+                            "relevance": float(row[11]) if row[11] else 0,
+                        })
+        except Exception as e:
+            logger.error(f"[VectorOps] Thread search failed: {e}")
+        return results
+
+    def _search_semantic(self, embedding_str: str, n_results: int, filters: dict,
+                         project_id: str, tenant_id: str) -> list:
         where_clauses = []
         filter_params = []
 
@@ -125,15 +276,6 @@ class VectorOps:
             if filters.get("segment_type"):
                 where_clauses.append("segment_type = %s")
                 filter_params.append(filters["segment_type"])
-            if filters.get("team"):
-                where_clauses.append("source_identifier->>'team_name' = %s")
-                filter_params.append(filters["team"])
-            if filters.get("channel"):
-                where_clauses.append("source_identifier->>'channel_name' = %s")
-                filter_params.append(filters["channel"])
-            if filters.get("sender"):
-                where_clauses.append("sender = %s")
-                filter_params.append(filters["sender"])
 
         where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
@@ -165,11 +307,12 @@ class VectorOps:
                                 "channel": source_id.get("channel_name", ""),
                                 "message_type": row[6], "message_id": row[7],
                                 "parent_message_id": row[8],
+                                "result_type": "message",
                             },
                             "relevance": float(row[9]) if row[9] else 0,
                         })
         except Exception as e:
-            logger.error(f"Search failed: {e}")
+            logger.error(f"[VectorOps] Semantic search failed: {e}")
         return results
 
     def get_stats(self, project_id: str, tenant_id: str) -> dict:
@@ -182,8 +325,8 @@ class VectorOps:
                              COUNT(*),
                              COUNT(DISTINCT source_identifier->>'team_name') FILTER (WHERE source_identifier->>'team_name' IS NOT NULL),
                              COUNT(DISTINCT source_identifier->>'channel_name') FILTER (WHERE source_identifier->>'channel_name' IS NOT NULL),
-                             COUNT(DISTINCT sender) FILTER (WHERE sender IS NOT NULL)
-                           FROM semantic_data
+                             COUNT(DISTINCT started_by) FILTER (WHERE started_by IS NOT NULL)
+                           FROM thread
                            WHERE project_id = %s AND tenant_id = %s""",
                         (project_id, tenant_id),
                     )
@@ -194,7 +337,7 @@ class VectorOps:
                         stats["unique_channels"] = row[2] or 0
                         stats["unique_senders"] = row[3] or 0
         except Exception as e:
-            logger.error(f"Stats query failed: {e}")
+            logger.error(f"[VectorOps] Stats query failed: {e}")
         return stats
 
     def get_last_sync(self, data_source_id: str) -> str:
@@ -208,15 +351,16 @@ class VectorOps:
                     if row and row[0]:
                         return row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0])
         except Exception as e:
-            logger.error(f"Last sync query failed: {e}")
+            logger.error(f"[VectorOps] Last sync query failed: {e}")
         return "Never"
 
     def clear_project(self, project_id: str, tenant_id: str):
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
+                    cur.execute("DELETE FROM thread WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
                     cur.execute("DELETE FROM semantic_data WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
                     cur.execute("UPDATE data_source SET last_sync_at = NULL WHERE project_id = %s AND tenant_id = %s", (project_id, tenant_id))
                 conn.commit()
         except Exception as e:
-            logger.error(f"Clear project failed: {e}")
+            logger.error(f"[VectorOps] Clear project failed: {e}")
