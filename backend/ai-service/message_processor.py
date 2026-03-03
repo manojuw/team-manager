@@ -98,17 +98,23 @@ class MessageProcessor:
                                     return self.teams_client.download_attachment_content(media_url)
                             except Exception as _e:
                                 logger.warning(f"[Processor] Failed to parse card_content for media URL: {_e}")
-                        att_id = att.get("id", "")
                         source_base_url = msg.get("source_base_url", "")
                         msg_id = msg.get("id", "")
-                        if att_id and source_base_url and msg_id:
-                            logger.info(f"[Processor] Downloading hosted content: {source_base_url}/messages/{msg_id}/hostedContents/{att_id}")
-                            return self.teams_client.download_hosted_content(source_base_url, msg_id, att_id)
+                        if source_base_url and msg_id:
+                            hosted = self.teams_client.list_message_hosted_contents(source_base_url, msg_id)
+                            logger.info(f"[Processor] Found {len(hosted)} hosted content(s) for message {msg_id}, trying each")
+                            for item in hosted:
+                                blob_id = item.get("id", "")
+                                if blob_id:
+                                    data = self.teams_client.download_hosted_content(source_base_url, msg_id, blob_id)
+                                    if data:
+                                        return data
                         return b""
 
                     if self.audio_processor.is_audio_attachment(att):
                         try:
                             effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.ogg"
+                            logger.info(f"[Processor] Audio card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}")
                             audio_bytes = _download_media()
                             transcript = self.audio_processor.transcribe_audio(audio_bytes, effective_name)
                             if transcript:
@@ -119,6 +125,7 @@ class MessageProcessor:
                     elif self.audio_processor.is_video_attachment(att):
                         try:
                             effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.mp4"
+                            logger.info(f"[Processor] Video card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}")
                             video_bytes = _download_media()
                             mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, effective_name)
                             mp3_name = effective_name.rsplit(".", 1)[0] + ".mp3"
@@ -173,16 +180,22 @@ class MessageProcessor:
                                     return self.teams_client.download_attachment_content(media_url)
                             except Exception as _e:
                                 logger.warning(f"[Processor] Failed to parse card_content for media URL: {_e}")
-                        att_id = att.get("id", "")
                         source_base_url = msg.get("source_base_url", "")
                         msg_id = msg.get("id", "")
-                        if att_id and source_base_url and msg_id:
-                            logger.info(f"[Processor] Downloading hosted content: {source_base_url}/messages/{msg_id}/hostedContents/{att_id}")
-                            return self.teams_client.download_hosted_content(source_base_url, msg_id, att_id)
+                        if source_base_url and msg_id:
+                            hosted = self.teams_client.list_message_hosted_contents(source_base_url, msg_id)
+                            logger.info(f"[Processor] Found {len(hosted)} hosted content(s) for message {msg_id}, trying each")
+                            for item in hosted:
+                                blob_id = item.get("id", "")
+                                if blob_id:
+                                    data = self.teams_client.download_hosted_content(source_base_url, msg_id, blob_id)
+                                    if data:
+                                        return data
                         return b""
 
                     if self.audio_processor.is_audio_attachment(att):
                         effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.ogg"
+                        logger.info(f"[Processor] Audio card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}")
                         try:
                             audio_bytes = _download_media()
                             transcript = self.audio_processor.transcribe_audio(audio_bytes, effective_name)
@@ -196,6 +209,7 @@ class MessageProcessor:
                             parts.append(f"{timestamp} {sender}: [sent a voice note: {effective_name}]")
                     elif self.audio_processor.is_video_attachment(att):
                         effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.mp4"
+                        logger.info(f"[Processor] Video card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}")
                         try:
                             video_bytes = _download_media()
                             mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, effective_name)

@@ -400,6 +400,15 @@ class TeamsClient:
             logger.warning(f"Failed to download attachment from {content_url}: {e}")
             return b""
 
+    def list_message_hosted_contents(self, chat_or_team_url: str, message_id: str) -> list:
+        url = f"{GRAPH_API_BASE}/{chat_or_team_url}/messages/{message_id}/hostedContents"
+        try:
+            data = self._get(url)
+            return data.get("value", [])
+        except Exception as e:
+            logger.warning(f"Failed to list hosted contents for message {message_id}: {e}")
+            return []
+
     def download_hosted_content(self, chat_or_team_url: str, message_id: str,
                                  hosted_content_id: str) -> bytes:
         url = f"{GRAPH_API_BASE}/{chat_or_team_url}/messages/{message_id}/hostedContents/{hosted_content_id}/$value"
