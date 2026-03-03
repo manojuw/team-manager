@@ -38,6 +38,7 @@ def _extract_attachments(msg: dict) -> list:
             "content_type": att.get("contentType", ""),
             "content_url": att.get("contentUrl", ""),
             "id": att.get("id", ""),
+            "card_content": att.get("content", ""),
         }
         result.append(info)
     return result

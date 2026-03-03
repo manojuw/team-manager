@@ -87,6 +87,17 @@ class MessageProcessor:
                     def _download_media(att=att, content_url=content_url, msg=msg):
                         if content_url:
                             return self.teams_client.download_attachment_content(content_url)
+                        card_content = att.get("card_content") or ""
+                        if card_content:
+                            try:
+                                import json as _json
+                                card = _json.loads(card_content)
+                                media_url = card.get("media", [{}])[0].get("url", "")
+                                if media_url:
+                                    logger.info("[Processor] Downloading audio card via AMS URL from card_content")
+                                    return self.teams_client.download_attachment_content(media_url)
+                            except Exception as _e:
+                                logger.warning(f"[Processor] Failed to parse card_content for media URL: {_e}")
                         att_id = att.get("id", "")
                         source_base_url = msg.get("source_base_url", "")
                         msg_id = msg.get("id", "")
@@ -151,6 +162,17 @@ class MessageProcessor:
                     def _download_media(att=att, content_url=content_url, msg=msg):
                         if content_url:
                             return self.teams_client.download_attachment_content(content_url)
+                        card_content = att.get("card_content") or ""
+                        if card_content:
+                            try:
+                                import json as _json
+                                card = _json.loads(card_content)
+                                media_url = card.get("media", [{}])[0].get("url", "")
+                                if media_url:
+                                    logger.info("[Processor] Downloading audio card via AMS URL from card_content")
+                                    return self.teams_client.download_attachment_content(media_url)
+                            except Exception as _e:
+                                logger.warning(f"[Processor] Failed to parse card_content for media URL: {_e}")
                         att_id = att.get("id", "")
                         source_base_url = msg.get("source_base_url", "")
                         msg_id = msg.get("id", "")
