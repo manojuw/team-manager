@@ -7,6 +7,7 @@ logger = logging.getLogger(__name__)
 
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
+CHUNK_MS = 25_000
 
 AUDIO_MIME_TYPES = {
     "audio/amr", "audio/mpeg", "audio/mp3", "audio/ogg",
@@ -99,32 +100,13 @@ class AudioProcessor:
         logger.info(f"[Audio] Converted {filename} to 16kHz mono WAV ({len(audio_bytes)} -> {len(result)} bytes)")
         return result
 
-    def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
-        if not SARVAM_API_KEY:
-            logger.warning("[Audio] SARVAM_API_KEY not set, skipping transcription")
-            return ""
-
-        detected_ext, mime_type = self.detect_audio_format(audio_bytes)
-        base = filename.rsplit(".", 1)[0] if "." in filename else filename
-
-        if detected_ext == "m4a":
-            try:
-                logger.info("[Audio] Converting m4a to 16kHz mono WAV for SarvamAI")
-                audio_bytes = self.to_stt_wav(audio_bytes, f"{base}.m4a")
-                detected_ext, mime_type = "wav", "audio/wav"
-            except Exception as e:
-                logger.warning(f"[Audio] m4a to WAV conversion failed: {e}")
-                return ""
-
-        effective_filename = f"{base}.{detected_ext}"
-
+    def _post_chunk(self, wav_bytes: bytes, filename: str) -> str:
         response = None
         try:
-            logger.info(f"[Audio] Transcribing {effective_filename} ({len(audio_bytes)} bytes) as {mime_type} via SarvamAI")
             response = requests.post(
                 SARVAM_STT_URL,
                 headers={"api-subscription-key": SARVAM_API_KEY},
-                files={"file": (effective_filename, io.BytesIO(audio_bytes), mime_type)},
+                files={"file": (filename, io.BytesIO(wav_bytes), "audio/wav")},
                 data={
                     "model": "saarika:v2.5",
                     "language_code": "unknown",
@@ -133,14 +115,55 @@ class AudioProcessor:
                 timeout=60,
             )
             response.raise_for_status()
-            result = response.json()
-            transcript = result.get("transcript", "")
-            logger.info(f"[Audio] Transcription complete: {len(transcript)} chars")
+            transcript = response.json().get("transcript", "")
+            logger.info(f"[Audio] Chunk {filename}: {len(transcript)} chars")
             return transcript
-        except requests.exceptions.HTTPError as e:
+        except requests.exceptions.HTTPError:
             body = response.text if response is not None else "(no response)"
             logger.error(f"[Audio] SarvamAI {response.status_code if response is not None else '?'}: {body}")
             return ""
         except Exception as e:
-            logger.error(f"[Audio] Transcription failed for {effective_filename}: {e}")
+            logger.error(f"[Audio] Chunk request failed for {filename}: {e}")
             return ""
+
+    def _transcribe_wav_bytes(self, wav_bytes: bytes, base: str) -> str:
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
+        duration_s = len(audio) / 1000.0
+
+        if duration_s <= 25:
+            return self._post_chunk(wav_bytes, f"{base}.wav")
+
+        logger.info(f"[Audio] Audio is {duration_s:.1f}s — splitting into 25s chunks")
+        chunks = [audio[i:i + CHUNK_MS] for i in range(0, len(audio), CHUNK_MS)]
+        parts = []
+        for idx, chunk in enumerate(chunks, 1):
+            chunk_io = io.BytesIO()
+            chunk.export(chunk_io, format="wav")
+            chunk_bytes = chunk_io.getvalue()
+            chunk_s = len(chunk) / 1000.0
+            logger.info(f"[Audio] Transcribing chunk {idx}/{len(chunks)} ({chunk_s:.1f}s, {len(chunk_bytes)} bytes)")
+            result = self._post_chunk(chunk_bytes, f"{base}_chunk{idx}.wav")
+            if result:
+                parts.append(result)
+
+        transcript = " ".join(parts)
+        logger.info(f"[Audio] Merged {len(chunks)} chunks → {len(transcript)} chars total")
+        return transcript
+
+    def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
+        if not SARVAM_API_KEY:
+            logger.warning("[Audio] SARVAM_API_KEY not set, skipping transcription")
+            return ""
+
+        detected_ext, _ = self.detect_audio_format(audio_bytes)
+        base = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+        try:
+            logger.info(f"[Audio] Converting {base}.{detected_ext} to 16kHz mono WAV")
+            wav_bytes = self.to_stt_wav(audio_bytes, f"{base}.{detected_ext}")
+        except Exception as e:
+            logger.warning(f"[Audio] WAV conversion failed for {base}.{detected_ext}: {e}")
+            return ""
+
+        return self._transcribe_wav_bytes(wav_bytes, base)
