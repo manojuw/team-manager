@@ -1,8 +1,19 @@
 import logging
 import os
 from typing import Optional
+from openai import OpenAI as _OpenAI
 
 logger = logging.getLogger(__name__)
+
+_embeddings_client = None
+
+
+def _get_embeddings_client():
+    global _embeddings_client
+    if _embeddings_client is None:
+        api_key = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        _embeddings_client = _OpenAI(api_key=api_key)
+    return _embeddings_client
 
 CLARIFY_SYSTEM_PROMPT = (
     "You are a professional translator and transcriber. "
@@ -106,7 +117,8 @@ class MessageProcessor:
 
     def embed_text(self, text: str) -> list:
         try:
-            response = self.openai.embeddings.create(
+            client = _get_embeddings_client()
+            response = client.embeddings.create(
                 model="text-embedding-3-small",
                 input=text[:8000],
             )

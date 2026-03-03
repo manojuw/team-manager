@@ -12,23 +12,19 @@ EMBEDDING_DIM = 1536
 EMBEDDING_MODEL = "text-embedding-3-small"
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-_openai_client = None
+_embeddings_client = None
 
 
-def _get_openai():
-    global _openai_client
-    if _openai_client is None:
+def _get_embeddings_client():
+    global _embeddings_client
+    if _embeddings_client is None:
         api_key = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-        base_url = os.environ.get("AI_INTEGRATIONS_OPENAI_BASE_URL")
-        kwargs = {"api_key": api_key}
-        if base_url:
-            kwargs["base_url"] = base_url
-        _openai_client = OpenAI(**kwargs)
-    return _openai_client
+        _embeddings_client = OpenAI(api_key=api_key)
+    return _embeddings_client
 
 
 def get_embedding(text: str) -> list:
-    client = _get_openai()
+    client = _get_embeddings_client()
     response = client.embeddings.create(model=EMBEDDING_MODEL, input=text[:8000])
     return response.data[0].embedding
 
@@ -36,7 +32,7 @@ def get_embedding(text: str) -> list:
 def get_embeddings_batch(texts: list) -> list:
     if not texts:
         return []
-    client = _get_openai()
+    client = _get_embeddings_client()
     truncated = [t[:8000] for t in texts]
     response = client.embeddings.create(model=EMBEDDING_MODEL, input=truncated)
     return [item.embedding for item in response.data]
