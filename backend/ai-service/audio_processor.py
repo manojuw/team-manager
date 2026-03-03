@@ -87,6 +87,18 @@ class AudioProcessor:
             logger.error(f"[Audio] video_to_mp3 failed for {filename}: {e}")
             raise
 
+    def to_stt_wav(self, audio_bytes: bytes, filename: str = "audio.m4a") -> bytes:
+        from pydub import AudioSegment
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp4"
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=ext)
+        audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        wav_io = io.BytesIO()
+        audio.export(wav_io, format="wav")
+        wav_io.seek(0)
+        result = wav_io.getvalue()
+        logger.info(f"[Audio] Converted {filename} to 16kHz mono WAV ({len(audio_bytes)} -> {len(result)} bytes)")
+        return result
+
     def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
         if not SARVAM_API_KEY:
             logger.warning("[Audio] SARVAM_API_KEY not set, skipping transcription")
@@ -97,15 +109,16 @@ class AudioProcessor:
 
         if detected_ext == "m4a":
             try:
-                logger.info("[Audio] Converting m4a to mp3 for SarvamAI compatibility")
-                audio_bytes = self.video_to_mp3(audio_bytes, f"{base}.m4a")
-                detected_ext, mime_type = "mp3", "audio/mpeg"
+                logger.info("[Audio] Converting m4a to 16kHz mono WAV for SarvamAI")
+                audio_bytes = self.to_stt_wav(audio_bytes, f"{base}.m4a")
+                detected_ext, mime_type = "wav", "audio/wav"
             except Exception as e:
-                logger.warning(f"[Audio] m4a to mp3 conversion failed: {e}")
+                logger.warning(f"[Audio] m4a to WAV conversion failed: {e}")
                 return ""
 
         effective_filename = f"{base}.{detected_ext}"
 
+        response = None
         try:
             logger.info(f"[Audio] Transcribing {effective_filename} ({len(audio_bytes)} bytes) as {mime_type} via SarvamAI")
             response = requests.post(
@@ -124,6 +137,10 @@ class AudioProcessor:
             transcript = result.get("transcript", "")
             logger.info(f"[Audio] Transcription complete: {len(transcript)} chars")
             return transcript
+        except requests.exceptions.HTTPError as e:
+            body = response.text if response is not None else "(no response)"
+            logger.error(f"[Audio] SarvamAI {response.status_code if response is not None else '?'}: {body}")
+            return ""
         except Exception as e:
             logger.error(f"[Audio] Transcription failed for {effective_filename}: {e}")
             return ""
