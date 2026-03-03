@@ -45,6 +45,33 @@ class AudioProcessor:
             return True
         return False
 
+    def detect_audio_format(self, data: bytes) -> tuple:
+        if not data:
+            return ("wav", "audio/wav")
+        if data[:5] == b'#!AMR':
+            logger.info("[Audio] Detected format from magic bytes: amr (audio/amr)")
+            return ("amr", "audio/amr")
+        if data[:4] == b'OggS':
+            logger.info("[Audio] Detected format from magic bytes: ogg (audio/ogg)")
+            return ("ogg", "audio/ogg")
+        if data[:4] == b'RIFF':
+            logger.info("[Audio] Detected format from magic bytes: wav (audio/wav)")
+            return ("wav", "audio/wav")
+        if len(data) > 8 and data[4:8] == b'ftyp':
+            logger.info("[Audio] Detected format from magic bytes: m4a (audio/mp4)")
+            return ("m4a", "audio/mp4")
+        if data[:4] == b'\x1a\x45\xdf\xa3':
+            logger.info("[Audio] Detected format from magic bytes: webm (audio/webm)")
+            return ("webm", "audio/webm")
+        if data[:3] == b'ID3':
+            logger.info("[Audio] Detected format from magic bytes: mp3 (audio/mpeg)")
+            return ("mp3", "audio/mpeg")
+        if len(data) > 1 and data[0] == 0xff and (data[1] & 0xe0) == 0xe0:
+            logger.info("[Audio] Detected format from magic bytes: mp3 (audio/mpeg)")
+            return ("mp3", "audio/mpeg")
+        logger.info("[Audio] Format not detected from magic bytes, defaulting to ogg")
+        return ("ogg", "audio/ogg")
+
     def video_to_mp3(self, video_bytes: bytes, filename: str = "video.mp4") -> bytes:
         try:
             from pydub import AudioSegment
@@ -65,20 +92,16 @@ class AudioProcessor:
             logger.warning("[Audio] SARVAM_API_KEY not set, skipping transcription")
             return ""
 
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "wav"
-        mime_map = {
-            "wav": "audio/wav", "mp3": "audio/mpeg", "amr": "audio/amr",
-            "ogg": "audio/ogg", "m4a": "audio/mp4", "aac": "audio/aac",
-            "webm": "audio/webm", "3gp": "audio/3gpp",
-        }
-        mime_type = mime_map.get(ext, "audio/wav")
+        detected_ext, mime_type = self.detect_audio_format(audio_bytes)
+        base = filename.rsplit(".", 1)[0] if "." in filename else filename
+        effective_filename = f"{base}.{detected_ext}"
 
         try:
-            logger.info(f"[Audio] Transcribing {filename} ({len(audio_bytes)} bytes) via SarvamAI")
+            logger.info(f"[Audio] Transcribing {effective_filename} ({len(audio_bytes)} bytes) as {mime_type} via SarvamAI")
             response = requests.post(
                 SARVAM_STT_URL,
                 headers={"api-subscription-key": SARVAM_API_KEY},
-                files={"file": (filename, io.BytesIO(audio_bytes), mime_type)},
+                files={"file": (effective_filename, io.BytesIO(audio_bytes), mime_type)},
                 data={
                     "model": "saarika:v2",
                     "language_code": "unknown",
@@ -92,5 +115,5 @@ class AudioProcessor:
             logger.info(f"[Audio] Transcription complete: {len(transcript)} chars")
             return transcript
         except Exception as e:
-            logger.error(f"[Audio] Transcription failed for {filename}: {e}")
+            logger.error(f"[Audio] Transcription failed for {effective_filename}: {e}")
             return ""
