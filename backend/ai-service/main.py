@@ -15,15 +15,15 @@ from typing import Optional
 import jwt
 
 import re as re_module
+import uuid as _uuid
 from teams_client import TeamsClient
 from vector_ops import VectorOps
 from ai_ops import ask_question_ai, summarize_ai
 from scheduler import SyncScheduler
 from encryption import decrypt_config
-from transcript_processor import process_transcripts
 from azure_devops_client import AzureDevOpsClient, DevOpsApiError
 from devops_sync import fetch_devops_work_items_as_messages
-from thread_engine import ThreadEngine
+from thread_engine import ThreadEngine, _parse_dt
 from message_processor import MessageProcessor
 from audio_processor import AudioProcessor
 from openai import OpenAI as _OpenAI
@@ -270,23 +270,48 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
 
     messages = client.get_channel_messages(req.team_id, req.channel_id, since=since)
 
-    base_url = f"teams/{req.team_id}/channels/{req.channel_id}"
-    transcript_msgs = process_transcripts(messages, client, base_url)
-    messages.extend(transcript_msgs)
+    vector_ops.insert_raw_messages(
+        messages, "microsoft_teams", "team_channel",
+        req.project_id, tenant_id, req.connector_id, req.data_source_id
+    )
+
+    meeting_messages = [m for m in messages if m.get("message_type") == "meeting_event"]
+    chat_messages = [m for m in messages if m.get("message_type") != "meeting_event"]
+
+    meeting_threads = [{
+        "id": str(_uuid.uuid4()),
+        "messages": [m],
+        "participants": {m.get("sender", "Unknown")},
+        "started_at": _parse_dt(m.get("created_at", "")),
+        "last_message_at": _parse_dt(m.get("created_at", "")),
+        "has_audio": False, "has_video": False, "is_meeting": True,
+    } for m in meeting_messages]
 
     openai_client = _make_openai_client()
     thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
-    threads = thread_engine.group_messages(messages)
+    chat_threads = thread_engine.group_messages(chat_messages)
 
     processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-    processed_threads = []
-    for thread in threads:
-        processed_threads.append(processor.process_thread(thread))
+    processed_meeting = [processor.process_thread(t) for t in meeting_threads]
+    processed_chat = [processor.process_thread(t) for t in chat_threads]
 
-    added = vector_ops.add_threads(
-        processed_threads, "microsoft_teams", "team_channel", source_identifier,
+    meeting_added = vector_ops.add_threads(
+        processed_meeting, "microsoft_teams", "meeting", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
+    chat_added = vector_ops.add_threads(
+        processed_chat, "microsoft_teams", "team_channel", source_identifier,
+        req.project_id, tenant_id, req.connector_id, req.data_source_id
+    )
+    added = meeting_added + chat_added
+
+    all_threads = meeting_threads + chat_threads
+    for thread in all_threads:
+        msg_ids = [m["id"] for m in thread.get("messages", []) if m.get("id")]
+        if msg_ids:
+            vector_ops.update_thread_message_thread_ids(
+                thread["id"], msg_ids, req.connector_id, req.data_source_id
+            )
 
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
                          added, len(messages), "microsoft_teams", "team_channel")
@@ -294,6 +319,7 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
     if req.data_source_id:
         _update_data_source_last_sync(req.data_source_id)
 
+    processed_threads = processed_meeting + processed_chat
     audio_count = sum(1 for t in processed_threads if t.get("has_audio"))
     video_count = sum(1 for t in processed_threads if t.get("has_video"))
 
@@ -301,6 +327,8 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
         "added": added,
         "total_fetched": len(messages),
         "threads": len(processed_threads),
+        "meeting_threads": len(processed_meeting),
+        "chat_threads": len(processed_chat),
         "audio_transcribed": audio_count,
         "video_transcribed": video_count,
     }
@@ -326,23 +354,48 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
 
     messages = client.get_chat_messages(req.chat_id, since=since)
 
-    base_url = f"chats/{req.chat_id}"
-    transcript_msgs = process_transcripts(messages, client, base_url)
-    messages.extend(transcript_msgs)
+    vector_ops.insert_raw_messages(
+        messages, "microsoft_teams", "group_chat",
+        req.project_id, tenant_id, req.connector_id, req.data_source_id
+    )
+
+    meeting_messages = [m for m in messages if m.get("message_type") == "meeting_event"]
+    chat_messages = [m for m in messages if m.get("message_type") != "meeting_event"]
+
+    meeting_threads = [{
+        "id": str(_uuid.uuid4()),
+        "messages": [m],
+        "participants": {m.get("sender", "Unknown")},
+        "started_at": _parse_dt(m.get("created_at", "")),
+        "last_message_at": _parse_dt(m.get("created_at", "")),
+        "has_audio": False, "has_video": False, "is_meeting": True,
+    } for m in meeting_messages]
 
     openai_client = _make_openai_client()
     thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
-    threads = thread_engine.group_messages(messages)
+    chat_threads = thread_engine.group_messages(chat_messages)
 
     processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-    processed_threads = []
-    for thread in threads:
-        processed_threads.append(processor.process_thread(thread))
+    processed_meeting = [processor.process_thread(t) for t in meeting_threads]
+    processed_chat = [processor.process_thread(t) for t in chat_threads]
 
-    added = vector_ops.add_threads(
-        processed_threads, "microsoft_teams", "group_chat", source_identifier,
+    meeting_added = vector_ops.add_threads(
+        processed_meeting, "microsoft_teams", "meeting", source_identifier,
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
+    chat_added = vector_ops.add_threads(
+        processed_chat, "microsoft_teams", "group_chat", source_identifier,
+        req.project_id, tenant_id, req.connector_id, req.data_source_id
+    )
+    added = meeting_added + chat_added
+
+    all_threads = meeting_threads + chat_threads
+    for thread in all_threads:
+        msg_ids = [m["id"] for m in thread.get("messages", []) if m.get("id")]
+        if msg_ids:
+            vector_ops.update_thread_message_thread_ids(
+                thread["id"], msg_ids, req.connector_id, req.data_source_id
+            )
 
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
                          added, len(messages), "microsoft_teams", "group_chat")
@@ -350,6 +403,7 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
     if req.data_source_id:
         _update_data_source_last_sync(req.data_source_id)
 
+    processed_threads = processed_meeting + processed_chat
     audio_count = sum(1 for t in processed_threads if t.get("has_audio"))
     video_count = sum(1 for t in processed_threads if t.get("has_video"))
 
@@ -357,6 +411,8 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
         "added": added,
         "total_fetched": len(messages),
         "threads": len(processed_threads),
+        "meeting_threads": len(processed_meeting),
+        "chat_threads": len(processed_chat),
         "audio_transcribed": audio_count,
         "video_transcribed": video_count,
     }

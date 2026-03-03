@@ -92,21 +92,21 @@ Follows SOLID principles with clean separation of concerns:
 - `OnlineMeetingTranscript.Read.All` (optional, for auto-fetching Teams meeting transcripts — requires admin policy)
 
 ## Thread-Aware Ingestion Pipeline (Teams)
-Teams messages go through a 4-stage pipeline before storage:
-1. **Thread grouping** (`thread_engine.py`): Messages sorted chronologically, grouped by time window (default 60 min) or parent reply. After a gap, OpenAI checks relatedness against the last N threads before creating a new one.
-2. **Content collection** (`message_processor.py`): Per-message content assembled with sender + timestamp. Audio attachments transcribed via SarvamAI; video converted to MP3 first via pydub/ffmpeg, then transcribed.
-3. **Clarification** (`message_processor.py`): Full thread text passed to `gpt-4o-mini` with strict "translate to clear English, preserve every detail, not summarization" prompt. Handles Hindi, Hinglish, and casual slang.
-4. **Embedding + storage** (`vector_ops.py`): Clarified text embedded with OpenAI `text-embedding-3-small` (1536-dim) and stored in the `thread` table.
+Teams messages go through a 5-stage pipeline before storage:
+1. **Audit insert** (`vector_ops.insert_raw_messages()`): All raw messages inserted immediately into `thread_message` with `thread_id = NULL` — before any processing. Enables tracking of what was received vs processed.
+2. **Meeting/chat split**: Messages with `message_type == "meeting_event"` are extracted into dedicated standalone threads (one thread per meeting). Remaining chat messages continue to thread grouping.
+3. **Thread grouping** (`thread_engine.py`): Chat messages sorted chronologically, grouped by time window (default 60 min) or parent reply. After a gap, OpenAI checks relatedness against last N threads.
+4. **Content collection + clarification** (`message_processor.py`): Per-message content assembled with sender + timestamp. Audio → SarvamAI transcription. Video → MP3 → SarvamAI transcription. Meeting events → metadata + any audio/video transcript. Full thread text clarified by `gpt-4o-mini` (translate to clear English, preserve every detail, no summarization).
+5. **Embedding + storage + back-update** (`vector_ops.py`): Clarified text embedded with `text-embedding-3-small` (1536-dim), stored in `thread` table. Meeting threads stored with `segment_type="meeting"`, chat threads with `"team_channel"` or `"group_chat"`. After storage, `thread_message.thread_id` is back-updated for each message.
 
-Azure DevOps data continues to use `add_messages()` → `semantic_data` table (unchanged).
+No VTT files are processed. Azure DevOps data uses `add_messages()` → `semantic_data` table (unchanged).
 
-## Transcript Ingestion
-Two transcript sources are supported during sync:
-1. **VTT file attachments**: Any `.vtt` file shared in a chat or channel is auto-detected, downloaded, parsed, and indexed
-2. **Teams meeting events**: Meeting recording/transcription events are detected; transcript content is fetched via Graph API (requires `OnlineMeetingTranscript.Read.All` — gracefully skipped if unavailable)
-- VTT parsing handles `<v Speaker>` tags, `Speaker: text` prefixes, and standard WebVTT cue blocks
-- Consecutive segments by the same speaker are grouped (up to ~500 chars) for embedding quality
-- Transcript entries stored with `message_type: "transcript"` in semantic_data
+## thread_message Audit Table
+- Every Teams message is inserted into `thread_message` immediately on fetch, before threading
+- `thread_id` starts as NULL; updated after the thread is resolved and stored
+- Any `thread_message` row with `thread_id = NULL` after sync = message that was missed/skipped
+- `message_id` is the Teams message ID; unique per `(message_id, connector_id, data_source_id)` — re-syncing won't duplicate rows
+- No FK constraint on `thread_id` by design (soft reference)
 
 ## Dependencies
 - **Backend (NestJS)**: @nestjs/core, @nestjs/typeorm, typeorm, @nestjs/jwt, passport-jwt, bcryptjs, class-validator, pg

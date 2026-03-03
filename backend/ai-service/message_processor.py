@@ -36,7 +36,81 @@ class MessageProcessor:
         self.audio_processor = audio_processor
         self.teams_client = teams_client
 
+    def _collect_meeting_content(self, thread: dict) -> str:
+        parts = []
+        for msg in thread.get("messages", []):
+            event_detail = msg.get("event_detail", {})
+            created_at = msg.get("created_at", "")
+            sender = msg.get("sender", "Unknown")
+
+            timestamp = ""
+            if created_at:
+                try:
+                    from datetime import datetime as _dt
+                    dt = _dt.fromisoformat(created_at.replace("Z", "+00:00"))
+                    timestamp = dt.strftime("[%Y-%m-%d %H:%M]")
+                except Exception:
+                    timestamp = f"[{created_at[:16]}]"
+
+            event_type = event_detail.get("@odata.type", "")
+            recording_name = event_detail.get("callRecordingDisplayName", "")
+            recording_status = event_detail.get("callRecordingStatus", "")
+            initiator_user = (event_detail.get("initiator") or {}).get("user", {}) or {}
+            initiator = initiator_user.get("displayName", sender)
+            join_url = event_detail.get("joinWebUrl", "")
+
+            if "callRecording" in event_type:
+                header = f"{timestamp} Meeting Recording: {recording_name or 'Unknown'}"
+                if recording_status:
+                    header += f" (Status: {recording_status})"
+                if initiator:
+                    header += f" — Recorded by: {initiator}"
+            elif "callTranscription" in event_type:
+                header = f"{timestamp} Meeting Transcription Event"
+                if initiator:
+                    header += f" — Initiated by: {initiator}"
+            else:
+                header = f"{timestamp} Meeting Event"
+                if sender and sender != "Unknown":
+                    header += f" — {sender}"
+
+            if join_url:
+                header += f"\nMeeting URL: {join_url}"
+
+            parts.append(header)
+
+            attachments = msg.get("attachments", [])
+            for att in attachments:
+                att_name = att.get("name") or att.get("content_type", "attachment")
+                content_url = att.get("content_url", "")
+                if self.audio_processor and self.teams_client and content_url:
+                    if self.audio_processor.is_audio_attachment(att):
+                        try:
+                            audio_bytes = self.teams_client.download_attachment_content(content_url)
+                            transcript = self.audio_processor.transcribe_audio(audio_bytes, att_name)
+                            if transcript:
+                                parts.append(f"Meeting Audio Transcript:\n{transcript}")
+                                msg["has_audio"] = True
+                        except Exception as e:
+                            logger.warning(f"[Processor] Meeting audio transcription failed: {e}")
+                    elif self.audio_processor.is_video_attachment(att):
+                        try:
+                            video_bytes = self.teams_client.download_attachment_content(content_url)
+                            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, att_name)
+                            mp3_name = att_name.rsplit(".", 1)[0] + ".mp3"
+                            transcript = self.audio_processor.transcribe_audio(mp3_bytes, mp3_name)
+                            if transcript:
+                                parts.append(f"Meeting Video Transcript:\n{transcript}")
+                                msg["has_video"] = True
+                        except Exception as e:
+                            logger.warning(f"[Processor] Meeting video transcription failed: {e}")
+
+        return "\n".join(parts) if parts else "Meeting event (no details available)"
+
     def _collect_thread_content(self, thread: dict) -> str:
+        if thread.get("is_meeting"):
+            return self._collect_meeting_content(thread)
+
         parts = []
         for msg in thread.get("messages", []):
             sender = msg.get("sender", "Unknown")
@@ -87,10 +161,10 @@ class MessageProcessor:
                         except Exception as e:
                             logger.warning(f"[Processor] Failed to process video {att_name}: {e}")
                             parts.append(f"{timestamp} {sender}: [sent a video: {att_name}]")
-                    elif not att.get("is_vtt", False):
+                    else:
                         parts.append(f"{timestamp} {sender}: [shared a file: {att_name}]")
                 else:
-                    if not content and att_name and not att.get("is_vtt", False):
+                    if not content and att_name:
                         parts.append(f"{timestamp} {sender}: [attachment: {att_name}]")
 
         return "\n".join(parts)

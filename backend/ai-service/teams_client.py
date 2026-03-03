@@ -17,15 +17,6 @@ MEETING_EVENT_TYPES = {
     "#microsoft.graph.callTranscriptionEventMessageDetail",
 }
 
-VTT_EXTENSIONS = {".vtt", ".webvtt"}
-
-
-def _is_vtt_attachment(att: dict) -> bool:
-    name = (att.get("name") or "").lower()
-    content_type = (att.get("contentType") or "").lower()
-    return any(name.endswith(ext) for ext in VTT_EXTENSIONS) or "text/vtt" in content_type
-
-
 def _extract_html_text(content: str) -> str:
     content = re.sub(r"<[^>]+>", " ", content)
     content = re.sub(r"\s+", " ", content).strip()
@@ -48,7 +39,6 @@ def _extract_attachments(msg: dict) -> list:
             "content_url": att.get("contentUrl", ""),
             "id": att.get("id", ""),
         }
-        info["is_vtt"] = _is_vtt_attachment(info)
         result.append(info)
     return result
 

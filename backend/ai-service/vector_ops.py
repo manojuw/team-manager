@@ -1,4 +1,5 @@
 import os
+import uuid
 import hashlib
 import logging
 import json
@@ -84,21 +85,25 @@ class VectorOps:
 
             embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
+            thread_id = thread.get("id") or str(uuid.uuid4())
+
             try:
                 with self._get_conn() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             """INSERT INTO thread
-                               (tenant_id, project_id, connector_id, data_source_id,
+                               (id, tenant_id, project_id, connector_id, data_source_id,
                                 source_type, segment_type, source_identifier,
                                 raw_messages, clarified_content, embedding,
                                 started_by, participants, message_count,
                                 has_audio, has_video, started_at, last_message_at)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb,
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb,
                                        %s::jsonb, %s, %s::vector,
                                        %s, %s::jsonb, %s,
-                                       %s, %s, %s, %s)""",
+                                       %s, %s, %s, %s)
+                               ON CONFLICT (id) DO NOTHING""",
                             (
+                                thread_id,
                                 tenant_id, project_id, connector_id, data_source_id,
                                 source_type, segment_type, source_id_json,
                                 json.dumps(serializable_messages), clarified, embedding_str,
@@ -113,6 +118,62 @@ class VectorOps:
 
         logger.info(f"[VectorOps] Added {added} threads (project={project_id})")
         return added
+
+    def insert_raw_messages(self, messages: list, source_type: str, segment_type: str,
+                            project_id: str, tenant_id: str,
+                            connector_id: str = None, data_source_id: str = None) -> int:
+        if not messages:
+            return 0
+        inserted = 0
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    for msg in messages:
+                        msg_id = msg.get("id", "")
+                        if not msg_id:
+                            continue
+                        raw_copy = {k: v for k, v in msg.items()
+                                    if isinstance(v, (str, int, float, bool, list, dict, type(None)))}
+                        cur.execute(
+                            """INSERT INTO thread_message
+                               (message_id, tenant_id, project_id, connector_id, data_source_id,
+                                source_type, segment_type, sender, content, created_at, raw_message)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                               ON CONFLICT (message_id, connector_id, data_source_id) DO NOTHING""",
+                            (
+                                msg_id, tenant_id, project_id, connector_id, data_source_id,
+                                source_type, segment_type,
+                                msg.get("sender", ""),
+                                (msg.get("content") or "")[:2000],
+                                msg.get("created_at"),
+                                json.dumps(raw_copy),
+                            ),
+                        )
+                        if cur.rowcount:
+                            inserted += 1
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[VectorOps] Failed to insert raw messages: {e}")
+        logger.info(f"[VectorOps] Inserted {inserted} raw messages into thread_message")
+        return inserted
+
+    def update_thread_message_thread_ids(self, thread_id: str, message_ids: list,
+                                          connector_id: str = None, data_source_id: str = None) -> None:
+        if not message_ids or not thread_id:
+            return
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE thread_message SET thread_id = %s
+                           WHERE message_id = ANY(%s)
+                           AND connector_id IS NOT DISTINCT FROM %s
+                           AND data_source_id IS NOT DISTINCT FROM %s""",
+                        (thread_id, message_ids, connector_id, data_source_id),
+                    )
+                conn.commit()
+        except Exception as e:
+            logger.error(f"[VectorOps] Failed to update thread_message thread_ids: {e}")
 
     def add_messages(self, messages: list, source_type: str, segment_type: str,
                      source_identifier: dict, project_id: str, tenant_id: str,
