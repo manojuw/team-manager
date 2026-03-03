@@ -126,7 +126,7 @@ class AudioProcessor:
                 headers={"api-subscription-key": SARVAM_API_KEY},
                 files={"file": (effective_filename, io.BytesIO(audio_bytes), mime_type)},
                 data={
-                    "model": "saarika:v2",
+                    "model": "saarika:v2.5",
                     "language_code": "unknown",
                     "with_timestamps": "false",
                 },
