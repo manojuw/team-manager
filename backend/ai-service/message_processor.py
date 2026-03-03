@@ -11,7 +11,7 @@ _embeddings_client = None
 def _get_embeddings_client():
     global _embeddings_client
     if _embeddings_client is None:
-        api_key = os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
         _embeddings_client = _OpenAI(api_key=api_key)
     return _embeddings_client
 
