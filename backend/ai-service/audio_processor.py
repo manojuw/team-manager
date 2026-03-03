@@ -94,6 +94,16 @@ class AudioProcessor:
 
         detected_ext, mime_type = self.detect_audio_format(audio_bytes)
         base = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+        if detected_ext == "m4a":
+            try:
+                logger.info("[Audio] Converting m4a to mp3 for SarvamAI compatibility")
+                audio_bytes = self.video_to_mp3(audio_bytes, f"{base}.m4a")
+                detected_ext, mime_type = "mp3", "audio/mpeg"
+            except Exception as e:
+                logger.warning(f"[Audio] m4a to mp3 conversion failed: {e}")
+                return ""
+
         effective_filename = f"{base}.{detected_ext}"
 
         try:

@@ -5,6 +5,11 @@ from openai import OpenAI as _OpenAI
 
 logger = logging.getLogger(__name__)
 
+
+class AudioTranscriptionRequired(Exception):
+    pass
+
+
 _embeddings_client = None
 
 
@@ -203,10 +208,13 @@ class MessageProcessor:
                                 parts.append(f"{timestamp} {sender} [voice note]: {transcript}")
                                 msg["has_audio"] = True
                             else:
-                                parts.append(f"{timestamp} {sender}: [sent a voice note: {effective_name}]")
+                                logger.info(f"[Processor] Audio transcription returned empty for {effective_name}, skipping thread")
+                                raise AudioTranscriptionRequired(effective_name)
+                        except AudioTranscriptionRequired:
+                            raise
                         except Exception as e:
                             logger.warning(f"[Processor] Failed to transcribe audio {effective_name}: {e}")
-                            parts.append(f"{timestamp} {sender}: [sent a voice note: {effective_name}]")
+                            raise AudioTranscriptionRequired(effective_name)
                     elif self.audio_processor.is_video_attachment(att):
                         effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.mp4"
                         logger.info(f"[Processor] Video card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}")
@@ -219,10 +227,13 @@ class MessageProcessor:
                                 parts.append(f"{timestamp} {sender} [video audio]: {transcript}")
                                 msg["has_video"] = True
                             else:
-                                parts.append(f"{timestamp} {sender}: [sent a video: {effective_name}]")
+                                logger.info(f"[Processor] Video transcription returned empty for {effective_name}, skipping thread")
+                                raise AudioTranscriptionRequired(effective_name)
+                        except AudioTranscriptionRequired:
+                            raise
                         except Exception as e:
                             logger.warning(f"[Processor] Failed to process video {effective_name}: {e}")
-                            parts.append(f"{timestamp} {sender}: [sent a video: {effective_name}]")
+                            raise AudioTranscriptionRequired(effective_name)
                     else:
                         parts.append(f"{timestamp} {sender}: [shared a file: {att_name}]")
                 else:
@@ -263,8 +274,12 @@ class MessageProcessor:
             logger.error(f"[Processor] Embedding failed: {e}")
             return []
 
-    def process_thread(self, thread: dict) -> dict:
-        raw_text = self._collect_thread_content(thread)
+    def process_thread(self, thread: dict):
+        try:
+            raw_text = self._collect_thread_content(thread)
+        except AudioTranscriptionRequired as e:
+            logger.info(f"[Processor] Dropping thread — audio transcription failed for: {e}")
+            return None
         clarified = self.clarify_thread(raw_text)
         embedding = self.embed_text(clarified) if clarified else []
 

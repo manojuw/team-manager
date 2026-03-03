@@ -193,8 +193,8 @@ class SyncScheduler:
             chat_threads = thread_engine.group_messages(chat_messages)
 
             processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-            processed_meeting = [processor.process_thread(t) for t in meeting_threads]
-            processed_chat = [processor.process_thread(t) for t in chat_threads]
+            processed_meeting = [r for r in (processor.process_thread(t) for t in meeting_threads) if r is not None]
+            processed_chat = [r for r in (processor.process_thread(t) for t in chat_threads) if r is not None]
 
             meeting_added = self.vector_ops.add_threads(
                 processed_meeting, "microsoft_teams", "meeting", source_identifier,
@@ -256,8 +256,8 @@ class SyncScheduler:
             chat_threads = thread_engine.group_messages(chat_messages)
 
             processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-            processed_meeting = [processor.process_thread(t) for t in meeting_threads]
-            processed_chat = [processor.process_thread(t) for t in chat_threads]
+            processed_meeting = [r for r in (processor.process_thread(t) for t in meeting_threads) if r is not None]
+            processed_chat = [r for r in (processor.process_thread(t) for t in chat_threads) if r is not None]
 
             meeting_added = self.vector_ops.add_threads(
                 processed_meeting, "microsoft_teams", "meeting", source_identifier,
