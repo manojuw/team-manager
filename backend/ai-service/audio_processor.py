@@ -12,10 +12,12 @@ AUDIO_MIME_TYPES = {
     "audio/amr", "audio/mpeg", "audio/mp3", "audio/ogg",
     "audio/wav", "audio/mp4", "audio/aac", "audio/webm",
     "audio/x-m4a", "audio/x-wav", "audio/3gpp",
+    "application/vnd.microsoft.card.audio",
 }
 VIDEO_MIME_TYPES = {
     "video/mp4", "video/mpeg", "video/webm", "video/quicktime",
     "video/x-msvideo", "video/3gpp", "video/x-matroska",
+    "application/vnd.microsoft.card.video",
 }
 
 AUDIO_EXTENSIONS = {".amr", ".mp3", ".ogg", ".wav", ".m4a", ".aac", ".weba", ".3gp"}

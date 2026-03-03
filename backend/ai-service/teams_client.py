@@ -166,6 +166,7 @@ class TeamsClient:
                             "attachments": [],
                             "message_type": "meeting_event",
                             "event_detail": event_detail,
+                            "source_base_url": f"teams/{team_id}/channels/{channel_id}",
                         })
 
                 body = msg.get("body", {})
@@ -185,6 +186,7 @@ class TeamsClient:
                         "created_at": created,
                         "attachments": attachment_info,
                         "message_type": msg.get("messageType", "message"),
+                        "source_base_url": f"teams/{team_id}/channels/{channel_id}",
                     })
                 elif attachment_info:
                     results.append({
@@ -194,6 +196,7 @@ class TeamsClient:
                         "created_at": created,
                         "attachments": attachment_info,
                         "message_type": msg.get("messageType", "message"),
+                        "source_base_url": f"teams/{team_id}/channels/{channel_id}",
                     })
 
             replies = self._get_message_replies(team_id, channel_id, msg_id)
@@ -226,15 +229,17 @@ class TeamsClient:
             if content_type == "html":
                 content = _extract_html_text(content)
 
-            if content.strip():
+            reply_attachment_info = _extract_attachments(reply)
+            if content.strip() or reply_attachment_info:
                 results.append({
                     "id": reply.get("id", ""),
                     "content": content,
                     "sender": _extract_sender(reply),
                     "created_at": reply.get("createdDateTime", ""),
-                    "attachments": _extract_attachments(reply),
+                    "attachments": reply_attachment_info,
                     "message_type": "reply",
                     "parent_message_id": message_id,
+                    "source_base_url": f"teams/{team_id}/channels/{channel_id}",
                 })
 
         return results
@@ -333,6 +338,7 @@ class TeamsClient:
                         "attachments": [],
                         "message_type": "meeting_event",
                         "event_detail": event_detail,
+                        "source_base_url": f"chats/{chat_id}",
                     })
 
             body = msg.get("body", {})
@@ -352,6 +358,7 @@ class TeamsClient:
                     "created_at": created,
                     "attachments": attachment_info,
                     "message_type": msg.get("messageType", "message"),
+                    "source_base_url": f"chats/{chat_id}",
                 })
             elif attachment_info:
                 results.append({
@@ -361,6 +368,7 @@ class TeamsClient:
                     "created_at": created,
                     "attachments": attachment_info,
                     "message_type": msg.get("messageType", "message"),
+                    "source_base_url": f"chats/{chat_id}",
                 })
 
         return results

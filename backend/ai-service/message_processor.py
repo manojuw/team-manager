@@ -82,12 +82,24 @@ class MessageProcessor:
             attachments = msg.get("attachments", [])
             for att in attachments:
                 att_name = att.get("name") or att.get("content_type", "attachment")
-                content_url = att.get("content_url", "")
-                if self.audio_processor and self.teams_client and content_url:
+                content_url = att.get("content_url") or ""
+                if self.audio_processor and self.teams_client:
+                    def _download_media(att=att, content_url=content_url, msg=msg):
+                        if content_url:
+                            return self.teams_client.download_attachment_content(content_url)
+                        att_id = att.get("id", "")
+                        source_base_url = msg.get("source_base_url", "")
+                        msg_id = msg.get("id", "")
+                        if att_id and source_base_url and msg_id:
+                            logger.info(f"[Processor] Downloading hosted content: {source_base_url}/messages/{msg_id}/hostedContents/{att_id}")
+                            return self.teams_client.download_hosted_content(source_base_url, msg_id, att_id)
+                        return b""
+
                     if self.audio_processor.is_audio_attachment(att):
                         try:
-                            audio_bytes = self.teams_client.download_attachment_content(content_url)
-                            transcript = self.audio_processor.transcribe_audio(audio_bytes, att_name)
+                            effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.ogg"
+                            audio_bytes = _download_media()
+                            transcript = self.audio_processor.transcribe_audio(audio_bytes, effective_name)
                             if transcript:
                                 parts.append(f"Meeting Audio Transcript:\n{transcript}")
                                 msg["has_audio"] = True
@@ -95,9 +107,10 @@ class MessageProcessor:
                             logger.warning(f"[Processor] Meeting audio transcription failed: {e}")
                     elif self.audio_processor.is_video_attachment(att):
                         try:
-                            video_bytes = self.teams_client.download_attachment_content(content_url)
-                            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, att_name)
-                            mp3_name = att_name.rsplit(".", 1)[0] + ".mp3"
+                            effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.mp4"
+                            video_bytes = _download_media()
+                            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, effective_name)
+                            mp3_name = effective_name.rsplit(".", 1)[0] + ".mp3"
                             transcript = self.audio_processor.transcribe_audio(mp3_bytes, mp3_name)
                             if transcript:
                                 parts.append(f"Meeting Video Transcript:\n{transcript}")
@@ -132,35 +145,48 @@ class MessageProcessor:
 
             for att in attachments:
                 att_name = att.get("name") or att.get("content_type", "attachment")
-                content_url = att.get("content_url", "")
+                content_url = att.get("content_url") or ""
 
-                if self.audio_processor and self.teams_client and content_url:
+                if self.audio_processor and self.teams_client:
+                    def _download_media(att=att, content_url=content_url, msg=msg):
+                        if content_url:
+                            return self.teams_client.download_attachment_content(content_url)
+                        att_id = att.get("id", "")
+                        source_base_url = msg.get("source_base_url", "")
+                        msg_id = msg.get("id", "")
+                        if att_id and source_base_url and msg_id:
+                            logger.info(f"[Processor] Downloading hosted content: {source_base_url}/messages/{msg_id}/hostedContents/{att_id}")
+                            return self.teams_client.download_hosted_content(source_base_url, msg_id, att_id)
+                        return b""
+
                     if self.audio_processor.is_audio_attachment(att):
+                        effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.ogg"
                         try:
-                            audio_bytes = self.teams_client.download_attachment_content(content_url)
-                            transcript = self.audio_processor.transcribe_audio(audio_bytes, att_name)
+                            audio_bytes = _download_media()
+                            transcript = self.audio_processor.transcribe_audio(audio_bytes, effective_name)
                             if transcript:
                                 parts.append(f"{timestamp} {sender} [voice note]: {transcript}")
                                 msg["has_audio"] = True
                             else:
-                                parts.append(f"{timestamp} {sender}: [sent a voice note: {att_name}]")
+                                parts.append(f"{timestamp} {sender}: [sent a voice note: {effective_name}]")
                         except Exception as e:
-                            logger.warning(f"[Processor] Failed to transcribe audio {att_name}: {e}")
-                            parts.append(f"{timestamp} {sender}: [sent a voice note: {att_name}]")
+                            logger.warning(f"[Processor] Failed to transcribe audio {effective_name}: {e}")
+                            parts.append(f"{timestamp} {sender}: [sent a voice note: {effective_name}]")
                     elif self.audio_processor.is_video_attachment(att):
+                        effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.mp4"
                         try:
-                            video_bytes = self.teams_client.download_attachment_content(content_url)
-                            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, att_name)
-                            mp3_name = att_name.rsplit(".", 1)[0] + ".mp3"
+                            video_bytes = _download_media()
+                            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, effective_name)
+                            mp3_name = effective_name.rsplit(".", 1)[0] + ".mp3"
                             transcript = self.audio_processor.transcribe_audio(mp3_bytes, mp3_name)
                             if transcript:
                                 parts.append(f"{timestamp} {sender} [video audio]: {transcript}")
                                 msg["has_video"] = True
                             else:
-                                parts.append(f"{timestamp} {sender}: [sent a video: {att_name}]")
+                                parts.append(f"{timestamp} {sender}: [sent a video: {effective_name}]")
                         except Exception as e:
-                            logger.warning(f"[Processor] Failed to process video {att_name}: {e}")
-                            parts.append(f"{timestamp} {sender}: [sent a video: {att_name}]")
+                            logger.warning(f"[Processor] Failed to process video {effective_name}: {e}")
+                            parts.append(f"{timestamp} {sender}: [sent a video: {effective_name}]")
                     else:
                         parts.append(f"{timestamp} {sender}: [shared a file: {att_name}]")
                 else:
