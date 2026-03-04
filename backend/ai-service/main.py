@@ -94,6 +94,8 @@ def _run_migrations():
                 """)
             except Exception:
                 pass
+            cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS summary TEXT")
+            cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS task_planning TEXT")
         conn.commit()
         conn.close()
         logger.info("[Migration] Migrations applied successfully")
@@ -159,10 +161,94 @@ def _retro_match_work_items():
     logger.info(f"[RetroMatch] Complete: {matched}/{len(rows)} items linked")
 
 
+def _retro_generate_thread_plans():
+    import json as _json
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, clarified_content FROM thread
+                   WHERE (summary IS NULL OR summary = '')
+                     AND clarified_content IS NOT NULL
+                     AND clarified_content != ''
+                   LIMIT 20"""
+            )
+            rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[RetroThreadPlan] Failed to fetch threads: {e}")
+        return
+
+    if not rows:
+        logger.info("[RetroThreadPlan] All threads already have plans")
+        return
+
+    logger.info(f"[RetroThreadPlan] Generating plans for {len(rows)} threads")
+    openai_client = _make_openai_client()
+    done = 0
+
+    for thread_id, clarified_content in rows:
+        try:
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You analyze translated Teams conversation threads and produce a structured summary and task plan. "
+                            "Be concise and accurate. Respond with JSON only."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Conversation:\n{clarified_content[:3000]}\n\n"
+                            "Produce JSON with two fields:\n"
+                            "1. \"summary\": 2-3 sentences describing what this conversation is about and its main outcome.\n"
+                            "2. \"task_planning\": A Markdown-formatted plan with these sections (omit any section that has no content):\n"
+                            "   ## Action Items\n"
+                            "   - [ ] **Person** — what needs to be done\n"
+                            "   ## Decisions Made\n"
+                            "   - decision\n"
+                            "   ## Open Questions\n"
+                            "   - question\n\n"
+                            "Return JSON only: {\"summary\": \"...\", \"task_planning\": \"...\"}"
+                        ),
+                    },
+                ],
+                temperature=0,
+                max_tokens=1000,
+            )
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            data = _json.loads(raw)
+            summary = str(data.get("summary", ""))
+            task_planning = str(data.get("task_planning", ""))
+
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE thread SET summary = %s, task_planning = %s WHERE id = %s",
+                    (summary, task_planning, thread_id),
+                )
+            conn.commit()
+            conn.close()
+            logger.info(f"[RetroThreadPlan] Generated plan for thread {thread_id}")
+            done += 1
+        except Exception as e:
+            logger.error(f"[RetroThreadPlan] Error for thread {thread_id}: {e}")
+
+    logger.info(f"[RetroThreadPlan] Complete: {done}/{len(rows)} threads updated")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _run_migrations()
     _retro_match_work_items()
+    _retro_generate_thread_plans()
     scheduler.start()
     logger.info("Background sync scheduler started")
     yield
@@ -737,6 +823,76 @@ def find_work_item(req: FindWorkItemRequest, user=Depends(verify_token)):
     searcher = WorkItemSearch(openai_client=openai_client, vector_ops=vector_ops)
     result = searcher.find(req.query, req.project_id, tenant_id)
     return result
+
+
+@app.get("/api/threads")
+def list_threads(project_id: str, limit: int = 50, offset: int = 0, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, segment_type, source_identifier, started_by, participants,
+                              message_count, has_audio, has_video, started_at, last_message_at,
+                              summary, task_planning
+                       FROM thread
+                       WHERE tenant_id = %s AND project_id = %s
+                       ORDER BY COALESCE(started_at, created_at) DESC
+                       LIMIT %s OFFSET %s""",
+                    (tenant_id, project_id, limit, offset),
+                )
+                rows = cur.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "id": str(row[0]),
+                "segment_type": row[1],
+                "source_identifier": row[2] or {},
+                "started_by": row[3] or "",
+                "participants": row[4] or [],
+                "message_count": row[5] or 0,
+                "has_audio": bool(row[6]),
+                "has_video": bool(row[7]),
+                "started_at": row[8].isoformat() if row[8] else None,
+                "last_message_at": row[9].isoformat() if row[9] else None,
+                "summary": row[10] or "",
+                "task_planning": row[11] or "",
+            })
+        return {"threads": result, "total": len(result)}
+    except Exception as e:
+        logger.error(f"list_threads failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/threads/{thread_id}/work-items")
+def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id, title, description, status, semantic_data_id, created_at
+                       FROM suggested_work_item
+                       WHERE thread_id = %s AND tenant_id = %s
+                       ORDER BY created_at""",
+                    (thread_id, tenant_id),
+                )
+                rows = cur.fetchall()
+        result = []
+        for row in rows:
+            result.append({
+                "id": str(row[0]),
+                "title": row[1],
+                "description": row[2] or "",
+                "status": row[3] or "pending",
+                "semantic_data_id": row[4],
+                "linked_to_devops": bool(row[4]),
+                "created_at": row[5].isoformat() if row[5] else None,
+            })
+        return {"work_items": result}
+    except Exception as e:
+        logger.error(f"get_thread_work_items failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/project-data/{project_id}")

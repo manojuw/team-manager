@@ -274,6 +274,57 @@ class MessageProcessor:
             logger.error(f"[Processor] Embedding failed: {e}")
             return []
 
+    def _generate_thread_plan(self, clarified_content: str) -> dict:
+        if not clarified_content or len(clarified_content.strip()) < 30:
+            return {"summary": "", "task_planning": ""}
+        try:
+            response = self.openai.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You analyze translated Teams conversation threads and produce a structured summary and task plan. "
+                            "Be concise and accurate. Respond with JSON only."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Conversation:\n{clarified_content[:3000]}\n\n"
+                            "Produce JSON with two fields:\n"
+                            "1. \"summary\": 2-3 sentences describing what this conversation is about and its main outcome.\n"
+                            "2. \"task_planning\": A Markdown-formatted plan with these sections (omit any section that has no content):\n"
+                            "   ## Action Items\n"
+                            "   - [ ] **Person** — what needs to be done\n"
+                            "   ## Decisions Made\n"
+                            "   - decision\n"
+                            "   ## Open Questions\n"
+                            "   - question\n\n"
+                            "Return JSON only: {\"summary\": \"...\", \"task_planning\": \"...\"}"
+                        ),
+                    },
+                ],
+                temperature=0,
+                max_tokens=1000,
+            )
+            raw = response.choices[0].message.content.strip()
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            import json as _json
+            data = _json.loads(raw)
+            result = {
+                "summary": str(data.get("summary", "")),
+                "task_planning": str(data.get("task_planning", "")),
+            }
+            logger.info(f"[Processor] Generated thread plan: summary={len(result['summary'])} chars, plan={len(result['task_planning'])} chars")
+            return result
+        except Exception as e:
+            logger.warning(f"[Processor] _generate_thread_plan failed: {e}")
+            return {"summary": "", "task_planning": ""}
+
     def process_thread(self, thread: dict):
         try:
             raw_text = self._collect_thread_content(thread)
@@ -282,10 +333,13 @@ class MessageProcessor:
             return None
         clarified = self.clarify_thread(raw_text)
         embedding = self.embed_text(clarified) if clarified else []
+        plan = self._generate_thread_plan(clarified) if clarified else {"summary": "", "task_planning": ""}
 
         return {
             **thread,
             "raw_text": raw_text,
             "clarified_content": clarified,
             "embedding": embedding,
+            "summary": plan["summary"],
+            "task_planning": plan["task_planning"],
         }

@@ -153,6 +153,8 @@ class VectorOps:
             message_count = len(raw_messages)
             has_audio = thread.get("has_audio", False)
             has_video = thread.get("has_video", False)
+            summary = thread.get("summary", "") or ""
+            task_planning = thread.get("task_planning", "") or ""
 
             def _dt(v):
                 if v is None:
@@ -179,11 +181,13 @@ class VectorOps:
                                 source_type, segment_type, source_identifier,
                                 raw_messages, clarified_content, embedding,
                                 started_by, participants, message_count,
-                                has_audio, has_video, started_at, last_message_at)
+                                has_audio, has_video, started_at, last_message_at,
+                                summary, task_planning)
                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb,
                                        %s::jsonb, %s, %s::vector,
                                        %s, %s::jsonb, %s,
-                                       %s, %s, %s, %s)
+                                       %s, %s, %s, %s,
+                                       %s, %s)
                                ON CONFLICT (id) DO NOTHING""",
                             (
                                 thread_id,
@@ -192,6 +196,7 @@ class VectorOps:
                                 json.dumps(serializable_messages), clarified, embedding_str,
                                 started_by, json.dumps(participants), message_count,
                                 has_audio, has_video, _dt(started_at), _dt(last_message_at),
+                                summary, task_planning,
                             ),
                         )
                         added += 1

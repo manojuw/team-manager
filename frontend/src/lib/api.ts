@@ -111,6 +111,13 @@ export const devopsStats = {
   get: (projectId: string) => fetchWithAuth(`${AI_API}/devops/stats/${projectId}`),
 };
 
+export const threads = {
+  list: (projectId: string, limit = 50, offset = 0) =>
+    fetchWithAuth(`${AI_API}/threads?project_id=${projectId}&limit=${limit}&offset=${offset}`),
+  getWorkItems: (threadId: string) =>
+    fetchWithAuth(`${AI_API}/threads/${threadId}/work-items`),
+};
+
 export const ai = {
   search: (data: { project_id: string; query: string; n_results?: number; filter_team?: string; filter_channel?: string }) =>
     fetchWithAuth(`${AI_API}/search`, { method: "POST", body: JSON.stringify(data) }),

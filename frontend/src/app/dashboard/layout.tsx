@@ -28,11 +28,13 @@ import {
   Menu,
   X,
   GitBranch,
+  MessageSquare,
 } from "lucide-react";
 
 const navItems = [
   { href: "/dashboard/projects", label: "Projects", icon: FolderOpen },
   { href: "/dashboard/connectors", label: "Connectors", icon: Plug },
+  { href: "/dashboard/threads", label: "Threads", icon: MessageSquare },
   { href: "/dashboard/devops", label: "DevOps", icon: GitBranch },
   { href: "/dashboard/knowledge-base", label: "Knowledge Base", icon: BookOpen },
   { href: "/dashboard/ask", label: "Ask Questions", icon: HelpCircle },
