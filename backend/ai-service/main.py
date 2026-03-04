@@ -84,8 +84,16 @@ def _run_migrations():
             """)
             cur.execute("""
                 ALTER TABLE suggested_work_item
-                  ADD COLUMN IF NOT EXISTS semantic_data_id UUID
+                  ADD COLUMN IF NOT EXISTS semantic_data_id TEXT
             """)
+            try:
+                cur.execute("""
+                    ALTER TABLE suggested_work_item
+                      ALTER COLUMN semantic_data_id TYPE TEXT
+                      USING REPLACE(semantic_data_id::text, '-', '')
+                """)
+            except Exception:
+                pass
         conn.commit()
         conn.close()
         logger.info("[Migration] Migrations applied successfully")
