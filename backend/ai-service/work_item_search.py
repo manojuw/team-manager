@@ -10,6 +10,7 @@ class WorkItemSearch:
         self.vector_ops = vector_ops
 
     def expand_query(self, query: str) -> list:
+        logger.info(f"[WorkItemSearch] Expanding query: '{query}'")
         try:
             response = self.openai.chat.completions.create(
                 model="gpt-4o-mini",
@@ -43,16 +44,19 @@ class WorkItemSearch:
             data = json.loads(raw)
             variations = data.get("queries", [])
             all_queries = [query] + [q for q in variations if q and q != query]
-            return all_queries[:5]
+            result = all_queries[:5]
+            logger.info(f"[WorkItemSearch] Expanded queries: {result}")
+            return result
         except Exception as e:
             logger.warning(f"[WorkItemSearch] expand_query error: {e}")
             return [query]
 
     def search_candidates(self, queries: list, project_id: str, tenant_id: str) -> list:
-        seen_ids = set()
         scored = {}
+        total = len(queries)
 
-        for q in queries:
+        for i, q in enumerate(queries):
+            logger.info(f"[WorkItemSearch] Searching with query [{i+1}/{total}]: '{q}'")
             try:
                 results = self.vector_ops.search_work_items(q, project_id, tenant_id, n_results=5)
                 for r in results:
@@ -65,16 +69,35 @@ class WorkItemSearch:
                     else:
                         scored[item_id]["relevance"] = max(scored[item_id]["relevance"], r["relevance"])
                         scored[item_id]["_hit_count"] += 1
+                logger.info(
+                    f"[WorkItemSearch] → {len(results)} results (running unique total: {len(scored)})"
+                )
             except Exception as e:
                 logger.warning(f"[WorkItemSearch] search_candidates query error for '{q}': {e}")
 
         candidates = list(scored.values())
         candidates.sort(key=lambda x: (x.get("_hit_count", 0), x.get("relevance", 0)), reverse=True)
+
+        logger.info(f"[WorkItemSearch] Candidates after dedup: {len(candidates)} unique items")
+        for j, c in enumerate(candidates[:5]):
+            logger.info(
+                f"  [{j}] '{c.get('title', 'N/A')[:60]}' "
+                f"hit_count={c.get('_hit_count', 0)} "
+                f"relevance={c.get('relevance', 0):.3f} "
+                f"source={c.get('source', 'N/A')}"
+            )
+
         return candidates[:10]
 
     def resolve_best_match(self, original_query: str, candidates: list) -> dict | None:
         if not candidates:
+            logger.info("[WorkItemSearch] No candidates to resolve — returning None")
             return None
+
+        logger.info(
+            f"[WorkItemSearch] Asking GPT to resolve among {len(candidates)} candidates "
+            f"for: '{original_query}'"
+        )
 
         candidates_text = ""
         for i, c in enumerate(candidates):
@@ -119,21 +142,31 @@ class WorkItemSearch:
                     raw = raw[4:]
             data = json.loads(raw)
 
-            if not data.get("found"):
-                return None
-
+            found = data.get("found", False)
             confidence = data.get("confidence", "low")
-            if confidence == "low":
-                logger.info(f"[WorkItemSearch] Low confidence match discarded for query: {original_query}")
+            idx = data.get("index")
+            reason = data.get("reason", "")
+
+            logger.info(
+                f"[WorkItemSearch] GPT resolution: found={found} confidence={confidence} "
+                f"index={idx} reason='{reason}'"
+            )
+
+            if not found:
+                logger.info("[WorkItemSearch] No match found by GPT")
                 return None
 
-            idx = data.get("index")
+            if confidence == "low":
+                logger.info("[WorkItemSearch] Discarded low-confidence match")
+                return None
+
             if idx is None or idx < 0 or idx >= len(candidates):
+                logger.warning(f"[WorkItemSearch] GPT returned invalid index {idx}, discarding")
                 return None
 
             result = dict(candidates[idx])
             result["confidence"] = confidence
-            result["reason"] = data.get("reason", "")
+            result["reason"] = reason
             return result
 
         except Exception as e:
@@ -141,16 +174,18 @@ class WorkItemSearch:
             return None
 
     def find(self, query: str, project_id: str, tenant_id: str) -> dict:
+        logger.info(f"[WorkItemSearch] === Starting work item search for: '{query}' ===")
         try:
             queries = self.expand_query(query)
-            logger.info(f"[WorkItemSearch] Expanded '{query}' → {len(queries)} queries")
 
             candidates = self.search_candidates(queries, project_id, tenant_id)
-            logger.info(f"[WorkItemSearch] Found {len(candidates)} unique candidates")
 
             best = self.resolve_best_match(query, candidates)
 
             if best:
+                logger.info(
+                    f"[WorkItemSearch] === Result: found=True confidence={best.get('confidence')} ==="
+                )
                 return {
                     "found": True,
                     "work_item": best,
@@ -159,6 +194,7 @@ class WorkItemSearch:
                     "queries_tried": len(queries),
                 }
             else:
+                logger.info("[WorkItemSearch] === Result: found=False confidence=none ===")
                 return {
                     "found": False,
                     "work_item": None,

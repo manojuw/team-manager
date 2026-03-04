@@ -82,6 +82,10 @@ def _run_migrations():
                 CREATE INDEX IF NOT EXISTS idx_suggested_wi_tenant
                   ON suggested_work_item(tenant_id, project_id)
             """)
+            cur.execute("""
+                ALTER TABLE suggested_work_item
+                  ADD COLUMN IF NOT EXISTS semantic_data_id UUID
+            """)
         conn.commit()
         conn.close()
         logger.info("[Migration] Migrations applied successfully")

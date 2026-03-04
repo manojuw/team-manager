@@ -11,6 +11,7 @@ class WorkItemExtractor:
     def check_message_for_work_item(self, message_text: str, thread_context: str) -> bool:
         if not message_text or len(message_text.strip()) < 10:
             return False
+        logger.info(f"[WorkItem] Checking message: '{message_text[:80]}...'")
         try:
             response = self.openai.chat.completions.create(
                 model="gpt-4o-mini",
@@ -40,7 +41,9 @@ class WorkItemExtractor:
             )
             raw = response.choices[0].message.content.strip()
             data = json.loads(raw)
-            return bool(data.get("is_work_item", False))
+            result = bool(data.get("is_work_item", False))
+            logger.info(f"[WorkItem] → is_work_item={result}")
+            return result
         except Exception as e:
             logger.warning(f"[WorkItem] check_message_for_work_item error: {e}")
             return False
@@ -48,6 +51,7 @@ class WorkItemExtractor:
     def extract_work_items_from_thread(self, clarified_content: str) -> list:
         if not clarified_content or len(clarified_content.strip()) < 20:
             return []
+        logger.info(f"[WorkItem] Extracting work items from thread content ({len(clarified_content)} chars)")
         try:
             response = self.openai.chat.completions.create(
                 model="gpt-4o-mini",
@@ -82,14 +86,15 @@ class WorkItemExtractor:
                 if raw.startswith("json"):
                     raw = raw[4:]
             data = json.loads(raw)
-            if not data.get("has_work_items"):
-                return []
-            items = data.get("work_items", [])
-            return [
+            has = data.get("has_work_items", False)
+            items = data.get("work_items", []) if has else []
+            parsed = [
                 {"title": str(item.get("title", ""))[:80], "description": str(item.get("description", ""))}
                 for item in items
                 if item.get("title")
             ]
+            logger.info(f"[WorkItem] → has_work_items={has} items={[i['title'] for i in parsed]}")
+            return parsed
         except Exception as e:
             logger.warning(f"[WorkItem] extract_work_items_from_thread error: {e}")
             return []
@@ -99,7 +104,13 @@ class WorkItemExtractor:
         clarified = processed_thread.get("clarified_content", "")
         messages = processed_thread.get("messages", [])
 
+        logger.info(
+            f"[WorkItem] Analyzing thread {thread_id} "
+            f"({len(messages)} messages, {len(clarified)} chars clarified)"
+        )
+
         if not clarified:
+            logger.info(f"[WorkItem] Thread {thread_id}: no clarified content, skipping")
             return []
 
         context = clarified[:400]
@@ -114,15 +125,23 @@ class WorkItemExtractor:
             if self.check_message_for_work_item(content, context):
                 trigger_message_ids.append(msg_id)
 
+        logger.info(
+            f"[WorkItem] Pass 1 complete: {len(trigger_message_ids)}/{len(messages)} messages triggered"
+        )
+
         if trigger_message_ids:
             work_items = self.extract_work_items_from_thread(clarified)
             for item in work_items:
                 item["source_message_ids"] = trigger_message_ids
         else:
             work_items = self.extract_work_items_from_thread(clarified)
+            if work_items:
+                logger.info(f"[WorkItem] Pass 2 (whole thread) result: {len(work_items)} item(s)")
             for item in work_items:
                 item["source_message_ids"] = all_msg_ids
 
-        logger.info(f"[WorkItem] Thread {thread_id}: found {len(work_items)} work item(s) "
-                    f"(trigger msgs: {len(trigger_message_ids)})")
+        logger.info(
+            f"[WorkItem] Thread {thread_id}: found {len(work_items)} work item(s) "
+            f"(trigger msgs: {len(trigger_message_ids)})"
+        )
         return work_items

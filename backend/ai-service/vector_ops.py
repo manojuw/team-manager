@@ -427,18 +427,55 @@ class VectorOps:
                 embed_text = f"{title}. {description}"[:2000]
                 embedding = get_embedding(embed_text)
                 embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
+                semantic_data_id = None
+                logger.info(f"[VectorOps] Checking for existing DevOps match for work item: '{title}'")
+                try:
+                    with self._get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """SELECT id, 1 - (embedding <=> %s::vector) AS similarity
+                                   FROM semantic_data
+                                   WHERE tenant_id = %s AND project_id = %s
+                                     AND source_type = 'azure_devops'
+                                     AND embedding IS NOT NULL
+                                   ORDER BY embedding <=> %s::vector
+                                   LIMIT 1""",
+                                (embedding_str, tenant_id, project_id, embedding_str),
+                            )
+                            row = cur.fetchone()
+                            if row:
+                                sim = float(row[1]) if row[1] else 0.0
+                                if sim >= 0.82:
+                                    semantic_data_id = str(row[0])
+                                    logger.info(
+                                        f"[VectorOps] → DevOps match found: {semantic_data_id} "
+                                        f"(similarity: {sim:.3f})"
+                                    )
+                                else:
+                                    logger.info(
+                                        f"[VectorOps] → No DevOps match "
+                                        f"(best similarity: {sim:.3f}, threshold: 0.82)"
+                                    )
+                            else:
+                                logger.info("[VectorOps] → No DevOps items found to match against")
+                except Exception as e:
+                    logger.warning(f"[VectorOps] DevOps match lookup failed: {e}")
+
                 with self._get_conn() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
                             """INSERT INTO suggested_work_item
                                (tenant_id, project_id, connector_id, data_source_id,
-                                thread_id, title, description, source_message_ids, embedding)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)""",
+                                thread_id, title, description, source_message_ids,
+                                embedding, semantic_data_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)""",
                             (
                                 tenant_id, project_id, connector_id, data_source_id,
                                 thread_id, title, description,
                                 source_message_ids if source_message_ids else [],
                                 embedding_str,
+                                semantic_data_id,
                             ),
                         )
                         if source_message_ids:
@@ -465,6 +502,7 @@ class VectorOps:
         embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
         results = []
 
+        suggested_results = []
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
@@ -479,7 +517,7 @@ class VectorOps:
                         (embedding_str, tenant_id, project_id, embedding_str, n_results),
                     )
                     for row in cur.fetchall():
-                        results.append({
+                        suggested_results.append({
                             "id": str(row[0]),
                             "title": row[1],
                             "description": row[2],
@@ -489,9 +527,20 @@ class VectorOps:
                             "source": "suggested",
                             "relevance": float(row[6]) if row[6] else 0.0,
                         })
+            logger.info(
+                f"[WorkItemSearch/DB] suggested_work_item: {len(suggested_results)} results "
+                f"for query '{query[:50]}'"
+            )
+            for i, r in enumerate(suggested_results):
+                logger.info(
+                    f"  [{i}] title='{r['title'][:60]}' "
+                    f"relevance={r['relevance']:.3f} source=suggested"
+                )
+            results.extend(suggested_results)
         except Exception as e:
             logger.error(f"[VectorOps] search_work_items (suggested) failed: {e}")
 
+        devops_results = []
         try:
             with self._get_conn() as conn:
                 with conn.cursor() as cur:
@@ -509,7 +558,7 @@ class VectorOps:
                         content = row[1] or ""
                         lines = content.splitlines()
                         title = lines[0][:80] if lines else content[:80]
-                        results.append({
+                        devops_results.append({
                             "id": str(row[0]),
                             "title": title,
                             "description": content[:500],
@@ -519,11 +568,25 @@ class VectorOps:
                             "source": "azure_devops",
                             "relevance": float(row[5]) if row[5] else 0.0,
                         })
+            logger.info(
+                f"[WorkItemSearch/DB] semantic_data(devops): {len(devops_results)} results "
+                f"for query '{query[:50]}'"
+            )
+            for i, r in enumerate(devops_results):
+                logger.info(
+                    f"  [{i}] title='{r['title'][:60]}' "
+                    f"relevance={r['relevance']:.3f} source=azure_devops"
+                )
+            results.extend(devops_results)
         except Exception as e:
             logger.error(f"[VectorOps] search_work_items (semantic_data) failed: {e}")
 
         results.sort(key=lambda r: r["relevance"], reverse=True)
-        return results[:n_results]
+        top = results[:n_results]
+        logger.info(
+            f"[WorkItemSearch/DB] Merged: {len(results)} total results, returning top {len(top)}"
+        )
+        return top
 
     def clear_project(self, project_id: str, tenant_id: str):
         try:
