@@ -278,7 +278,7 @@ class AzureDevOpsClient:
     def get_work_item_comments(self, project: str, work_item_id: int) -> list:
         url = f"{self.base_url}/{project}/_apis/wit/workitems/{work_item_id}/comments"
         try:
-            data = self._get(url)
+            data = self._get(url, params={"api-version": "7.0-preview"})
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
                 url_fallback = f"{self.base_url}/{project}/_apis/wit/workitems/{work_item_id}/updates"
