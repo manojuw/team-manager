@@ -86,11 +86,14 @@ function TaskPlanningRenderer({ markdown }: { markdown: string }) {
 
   const lines = markdown.split("\n");
   const elements: React.ReactNode[] = [];
+  let firstSection = true;
 
   lines.forEach((line, i) => {
     if (line.startsWith("## ")) {
+      const headingMt = firstSection ? "mt-0" : "mt-4";
+      firstSection = false;
       elements.push(
-        <h3 key={i} className="font-semibold text-sm mt-4 mb-2 text-foreground">
+        <h3 key={i} className={`font-semibold text-sm ${headingMt} mb-2 text-foreground`}>
           {line.replace("## ", "")}
         </h3>
       );
@@ -133,7 +136,7 @@ function TaskPlanningRenderer({ markdown }: { markdown: string }) {
     }
   });
 
-  return <div className="space-y-0.5">{elements}</div>;
+  return <div className="space-y-1">{elements}</div>;
 }
 
 function formatInline(text: string): string {
@@ -205,7 +208,7 @@ export default function ThreadsPage() {
 
       <div className="flex-1 flex gap-4 min-h-0">
         {/* Left panel — Thread list */}
-        <div className="w-full lg:w-[42%] flex flex-col border rounded-lg bg-card min-h-0">
+        <div className="w-full lg:w-[42%] flex flex-col border rounded-lg bg-card min-h-0 overflow-hidden">
           <div className="px-4 py-3 border-b flex items-center justify-between">
             <span className="text-sm font-medium">
               {loadingThreads ? "Loading..." : `${threadList.length} thread${threadList.length !== 1 ? "s" : ""}`}
