@@ -220,7 +220,8 @@ class SyncScheduler:
                 if work_items:
                     self.vector_ops.store_work_items(
                         work_items, pt["id"],
-                        tenant_id, project_id, connector_id, ds_id
+                        tenant_id, project_id, connector_id, ds_id,
+                        openai_client=openai_client
                     )
 
             self._record_sync(tenant_id, project_id, connector_id, ds_id,
@@ -292,7 +293,8 @@ class SyncScheduler:
                 if work_items:
                     self.vector_ops.store_work_items(
                         work_items, pt["id"],
-                        tenant_id, project_id, connector_id, ds_id
+                        tenant_id, project_id, connector_id, ds_id,
+                        openai_client=openai_client
                     )
 
             self._record_sync(tenant_id, project_id, connector_id, ds_id,

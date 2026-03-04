@@ -9,6 +9,89 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
+
+def _expand_queries_for_devops_match(openai_client, title: str, description: str) -> list:
+    base = [
+        title,
+        f"{title}. {description[:150]}" if description else title,
+    ]
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Generate 3 alternative search queries to find work items related to the given title and description. "
+                        "Use different phrasings, synonyms, and angles. Respond with JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Title: {title}\nDescription: {description[:200]}\n\n"
+                        "Return JSON only: {\"queries\": [\"...\", \"...\", \"...\"]}"
+                    ),
+                },
+            ],
+            temperature=0.3,
+            max_tokens=150,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw)
+        extras = [q for q in data.get("queries", []) if q and q not in base]
+        base.extend(extras[:3])
+    except Exception as e:
+        logger.warning(f"[VectorOps] Query expansion failed: {e}")
+    result = list(dict.fromkeys(base))[:5]
+    logger.info(f"[VectorOps] DevOps match queries: {result}")
+    return result
+
+
+def _confirm_devops_match_with_gpt(openai_client, suggested_title: str, suggested_desc: str, devops_content: str) -> bool:
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You determine if two work item descriptions refer to the same issue or task. "
+                        "Be strict but account for different phrasings. Respond with JSON only."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Suggested work item:\nTitle: {suggested_title}\nDescription: {suggested_desc[:300]}\n\n"
+                        f"Existing DevOps item:\n{devops_content[:500]}\n\n"
+                        "Are these about the same issue or task? "
+                        "Return JSON only: {\"same_issue\": true or false, \"reason\": \"brief\"}"
+                    ),
+                },
+            ],
+            temperature=0,
+            max_tokens=80,
+        )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        data = json.loads(raw)
+        same = bool(data.get("same_issue", False))
+        reason = data.get("reason", "")
+        logger.info(f"[VectorOps] GPT says same_issue={same} reason='{reason}'")
+        return same
+    except Exception as e:
+        logger.warning(f"[VectorOps] GPT confirmation failed: {e}")
+        return False
+
+
 EMBEDDING_DIM = 1536
 EMBEDDING_MODEL = "text-embedding-3-small"
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -411,9 +494,47 @@ class VectorOps:
             logger.error(f"[VectorOps] Last sync query failed: {e}")
         return "Never"
 
+    def search_devops_candidates(self, queries: list, tenant_id: str, project_id: str, n_results: int = 5) -> list:
+        scored = {}
+        total = len(queries)
+        for i, q in enumerate(queries):
+            try:
+                emb = get_embedding(q)
+                emb_str = "[" + ",".join(str(x) for x in emb) + "]"
+                with self._get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT id, content, 1 - (embedding <=> %s::vector) AS sim
+                               FROM semantic_data
+                               WHERE tenant_id = %s AND project_id = %s
+                                 AND source_type = 'azure_devops'
+                                 AND embedding IS NOT NULL
+                               ORDER BY embedding <=> %s::vector
+                               LIMIT %s""",
+                            (emb_str, tenant_id, project_id, emb_str, n_results),
+                        )
+                        rows = cur.fetchall()
+                logger.info(
+                    f"[VectorOps/DevOps] Query [{i+1}/{total}]: '{q[:60]}' → {len(rows)} results"
+                )
+                for row in rows:
+                    item_id = str(row[0])
+                    content = row[1] or ""
+                    sim = float(row[2]) if row[2] else 0.0
+                    logger.info(f"  title='{content[:60]}' sim={sim:.3f}")
+                    if item_id not in scored or scored[item_id]["sim"] < sim:
+                        scored[item_id] = {"id": item_id, "content": content, "sim": sim}
+            except Exception as e:
+                logger.warning(f"[VectorOps/DevOps] Query failed for '{q}': {e}")
+
+        candidates = sorted(scored.values(), key=lambda x: x["sim"], reverse=True)
+        logger.info(f"[VectorOps/DevOps] Candidate pool: {len(candidates)} unique DevOps items")
+        return candidates[:n_results]
+
     def store_work_items(self, work_items: list, thread_id: str,
                          tenant_id: str, project_id: str,
-                         connector_id: str = None, data_source_id: str = None) -> int:
+                         connector_id: str = None, data_source_id: str = None,
+                         openai_client=None) -> int:
         if not work_items:
             return 0
         stored = 0
@@ -431,34 +552,49 @@ class VectorOps:
                 semantic_data_id = None
                 logger.info(f"[VectorOps] Checking for existing DevOps match for work item: '{title}'")
                 try:
-                    with self._get_conn() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                """SELECT id, 1 - (embedding <=> %s::vector) AS similarity
-                                   FROM semantic_data
-                                   WHERE tenant_id = %s AND project_id = %s
-                                     AND source_type = 'azure_devops'
-                                     AND embedding IS NOT NULL
-                                   ORDER BY embedding <=> %s::vector
-                                   LIMIT 1""",
-                                (embedding_str, tenant_id, project_id, embedding_str),
-                            )
-                            row = cur.fetchone()
-                            if row:
-                                sim = float(row[1]) if row[1] else 0.0
-                                if sim >= 0.82:
-                                    semantic_data_id = str(row[0])
+                    if openai_client:
+                        queries = _expand_queries_for_devops_match(openai_client, title, description)
+                        candidates = self.search_devops_candidates(queries, tenant_id, project_id, n_results=5)
+                        logger.info(f"[VectorOps] DevOps candidate pool: {len(candidates)} unique items across {len(queries)} queries")
+                        for cand in candidates:
+                            if cand["sim"] >= 0.35:
+                                confirmed = _confirm_devops_match_with_gpt(
+                                    openai_client, title, description, cand["content"]
+                                )
+                                if confirmed:
+                                    semantic_data_id = cand["id"]
                                     logger.info(
-                                        f"[VectorOps] → DevOps match found: {semantic_data_id} "
-                                        f"(similarity: {sim:.3f})"
+                                        f"[VectorOps] → GPT confirmed DevOps match: {semantic_data_id} "
+                                        f"(similarity was {cand['sim']:.3f})"
                                     )
+                                    break
                                 else:
                                     logger.info(
-                                        f"[VectorOps] → No DevOps match "
-                                        f"(best similarity: {sim:.3f}, threshold: 0.82)"
+                                        f"[VectorOps] → GPT rejected candidate (sim={cand['sim']:.3f})"
                                     )
-                            else:
-                                logger.info("[VectorOps] → No DevOps items found to match against")
+                        if not semantic_data_id:
+                            logger.info("[VectorOps] → No confirmed DevOps match found")
+                    else:
+                        with self._get_conn() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    """SELECT id, 1 - (embedding <=> %s::vector) AS similarity
+                                       FROM semantic_data
+                                       WHERE tenant_id = %s AND project_id = %s
+                                         AND source_type = 'azure_devops'
+                                         AND embedding IS NOT NULL
+                                       ORDER BY embedding <=> %s::vector
+                                       LIMIT 1""",
+                                    (embedding_str, tenant_id, project_id, embedding_str),
+                                )
+                                row = cur.fetchone()
+                                if row:
+                                    sim = float(row[1]) if row[1] else 0.0
+                                    if sim >= 0.82:
+                                        semantic_data_id = str(row[0])
+                                        logger.info(f"[VectorOps] → Fallback match: {semantic_data_id} (sim={sim:.3f})")
+                                    else:
+                                        logger.info(f"[VectorOps] → No fallback match (best sim={sim:.3f})")
                 except Exception as e:
                     logger.warning(f"[VectorOps] DevOps match lookup failed: {e}")
 

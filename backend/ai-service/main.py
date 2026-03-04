@@ -93,9 +93,68 @@ def _run_migrations():
         logger.error(f"[Migration] Migration failed: {e}")
 
 
+def _retro_match_work_items():
+    from vector_ops import _expand_queries_for_devops_match, _confirm_devops_match_with_gpt
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, title, description, tenant_id::text, project_id
+                   FROM suggested_work_item
+                   WHERE semantic_data_id IS NULL AND embedding IS NOT NULL"""
+            )
+            rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.error(f"[RetroMatch] Failed to fetch suggested work items: {e}")
+        return
+
+    if not rows:
+        logger.info("[RetroMatch] No suggested work items need retro-matching")
+        return
+
+    logger.info(f"[RetroMatch] Checking {len(rows)} suggested work items with no DevOps link")
+    openai_client = _make_openai_client()
+    matched = 0
+
+    for row in rows:
+        item_id, title, description, tenant_id, project_id = row
+        desc = description or ""
+        try:
+            queries = _expand_queries_for_devops_match(openai_client, title, desc)
+            candidates = vector_ops.search_devops_candidates(queries, tenant_id, project_id, n_results=5)
+            linked = None
+            for cand in candidates:
+                if cand["sim"] >= 0.35:
+                    confirmed = _confirm_devops_match_with_gpt(
+                        openai_client, title, desc, cand["content"]
+                    )
+                    if confirmed:
+                        linked = cand["id"]
+                        break
+            if linked:
+                conn = psycopg2.connect(DATABASE_URL)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE suggested_work_item SET semantic_data_id = %s WHERE id = %s",
+                        (linked, item_id),
+                    )
+                conn.commit()
+                conn.close()
+                logger.info(f"[RetroMatch] '{title}' → linked to DevOps {linked}")
+                matched += 1
+            else:
+                logger.info(f"[RetroMatch] '{title}' → no match found")
+        except Exception as e:
+            logger.error(f"[RetroMatch] Error processing '{title}': {e}")
+
+    logger.info(f"[RetroMatch] Complete: {matched}/{len(rows)} items linked")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _run_migrations()
+    _retro_match_work_items()
     scheduler.start()
     logger.info("Background sync scheduler started")
     yield
@@ -365,7 +424,8 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
         if work_items:
             vector_ops.store_work_items(
                 work_items, pt["id"],
-                tenant_id, req.project_id, req.connector_id, req.data_source_id
+                tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                openai_client=openai_client
             )
 
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
@@ -458,7 +518,8 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
         if work_items:
             vector_ops.store_work_items(
                 work_items, pt["id"],
-                tenant_id, req.project_id, req.connector_id, req.data_source_id
+                tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                openai_client=openai_client
             )
 
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
