@@ -96,6 +96,9 @@ def _run_migrations():
                 pass
             cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS summary TEXT")
             cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS task_planning TEXT")
+            cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'pending'")
+            cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS viewed BOOLEAN DEFAULT FALSE")
+            cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS devops_work_item_id TEXT")
         conn.commit()
         conn.close()
         logger.info("[Migration] Migrations applied successfully")
@@ -143,15 +146,17 @@ def _retro_match_work_items():
                         linked = cand["id"]
                         break
             if linked:
+                linked_cand = next((c for c in candidates if c["id"] == linked), {})
+                wi_id = linked_cand.get("devops_work_item_id")
                 conn = psycopg2.connect(DATABASE_URL)
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE suggested_work_item SET semantic_data_id = %s WHERE id = %s",
-                        (linked, item_id),
+                        "UPDATE suggested_work_item SET semantic_data_id = %s, devops_work_item_id = %s WHERE id = %s",
+                        (linked, wi_id, item_id),
                     )
                 conn.commit()
                 conn.close()
-                logger.info(f"[RetroMatch] '{title}' → linked to DevOps {linked}")
+                logger.info(f"[RetroMatch] '{title}' → linked to DevOps {linked} (work_item_id={wi_id})")
                 matched += 1
             else:
                 logger.info(f"[RetroMatch] '{title}' → no match found")
@@ -826,20 +831,57 @@ def find_work_item(req: FindWorkItemRequest, user=Depends(verify_token)):
 
 
 @app.get("/api/threads")
-def list_threads(project_id: str, limit: int = 50, offset: int = 0, user=Depends(verify_token)):
+def list_threads(
+    project_id: str,
+    limit: int = 200,
+    offset: int = 0,
+    data_source_id: Optional[str] = None,
+    segment_type: Optional[str] = None,
+    viewed: Optional[str] = None,
+    review_status: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    user=Depends(verify_token),
+):
     tenant_id = user["tenantId"]
     try:
+        conditions = ["tenant_id = %s", "project_id = %s"]
+        params: list = [tenant_id, project_id]
+
+        if data_source_id:
+            conditions.append("data_source_id = %s")
+            params.append(data_source_id)
+        if segment_type:
+            conditions.append("segment_type = %s")
+            params.append(segment_type)
+        if viewed is not None and viewed in ("true", "false"):
+            conditions.append("viewed = %s")
+            params.append(viewed == "true")
+        if review_status:
+            conditions.append("review_status = %s")
+            params.append(review_status)
+        if date_from:
+            conditions.append("COALESCE(started_at, created_at) >= %s")
+            params.append(date_from)
+        if date_to:
+            conditions.append("COALESCE(started_at, created_at) <= %s")
+            params.append(date_to)
+
+        where_clause = " AND ".join(conditions)
+        params.extend([limit, offset])
+
         with vector_ops._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT id, segment_type, source_identifier, started_by, participants,
+                    f"""SELECT id, segment_type, source_identifier, started_by, participants,
                               message_count, has_audio, has_video, started_at, last_message_at,
-                              summary, task_planning
+                              summary, task_planning, review_status, viewed,
+                              created_at, data_source_id, source_type
                        FROM thread
-                       WHERE tenant_id = %s AND project_id = %s
-                       ORDER BY COALESCE(started_at, created_at) DESC
+                       WHERE {where_clause}
+                       ORDER BY created_at DESC
                        LIMIT %s OFFSET %s""",
-                    (tenant_id, project_id, limit, offset),
+                    params,
                 )
                 rows = cur.fetchall()
         result = []
@@ -857,10 +899,36 @@ def list_threads(project_id: str, limit: int = 50, offset: int = 0, user=Depends
                 "last_message_at": row[9].isoformat() if row[9] else None,
                 "summary": row[10] or "",
                 "task_planning": row[11] or "",
+                "review_status": row[12] or "pending",
+                "viewed": bool(row[13]),
+                "created_at": row[14].isoformat() if row[14] else None,
+                "data_source_id": str(row[15]) if row[15] else None,
+                "source_type": row[16] or "",
             })
         return {"threads": result, "total": len(result)}
     except Exception as e:
         logger.error(f"list_threads failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/threads/data-sources")
+def get_thread_data_sources(project_id: str, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT DISTINCT t.data_source_id, ds.name
+                       FROM thread t
+                       LEFT JOIN data_source ds ON ds.id = t.data_source_id
+                       WHERE t.tenant_id = %s AND t.project_id = %s
+                         AND t.data_source_id IS NOT NULL""",
+                    (tenant_id, project_id),
+                )
+                rows = cur.fetchall()
+        return {"data_sources": [{"id": str(r[0]), "name": r[1] or str(r[0])} for r in rows]}
+    except Exception as e:
+        logger.error(f"get_thread_data_sources failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -871,7 +939,7 @@ def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
         with vector_ops._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT id, title, description, status, semantic_data_id, created_at
+                    """SELECT id, title, description, status, semantic_data_id, created_at, devops_work_item_id
                        FROM suggested_work_item
                        WHERE thread_id = %s AND tenant_id = %s
                        ORDER BY created_at""",
@@ -887,11 +955,93 @@ def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
                 "status": row[3] or "pending",
                 "semantic_data_id": row[4],
                 "linked_to_devops": bool(row[4]),
+                "devops_work_item_id": row[6],
                 "created_at": row[5].isoformat() if row[5] else None,
             })
         return {"work_items": result}
     except Exception as e:
         logger.error(f"get_thread_work_items failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class ThreadStatusUpdate(BaseModel):
+    review_status: Optional[str] = None
+    viewed: Optional[bool] = None
+
+
+@app.patch("/api/threads/{thread_id}/status")
+def update_thread_status(thread_id: str, body: ThreadStatusUpdate, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    updates = []
+    params = []
+    if body.review_status is not None:
+        if body.review_status not in ("pending", "ignore", "action_taken"):
+            raise HTTPException(status_code=400, detail="review_status must be pending, ignore, or action_taken")
+        updates.append("review_status = %s")
+        params.append(body.review_status)
+    if body.viewed is not None:
+        updates.append("viewed = %s")
+        params.append(body.viewed)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    params.extend([thread_id, tenant_id])
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"UPDATE thread SET {', '.join(updates)} WHERE id = %s AND tenant_id = %s",
+                    params,
+                )
+            conn.commit()
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"update_thread_status failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/threads/{thread_id}/transcript")
+def get_thread_transcript(thread_id: str, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT clarified_content, raw_messages, started_by, started_at,
+                              last_message_at, segment_type, source_identifier, participants
+                       FROM thread WHERE id = %s AND tenant_id = %s""",
+                    (thread_id, tenant_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        clarified = row[0] or ""
+        raw_msgs = row[1] or []
+        started_by = row[2] or ""
+        started_at = row[3].isoformat() if row[3] else ""
+        last_at = row[4].isoformat() if row[4] else ""
+        segment_type = row[5] or ""
+        source_id = row[6] or {}
+        participants = row[7] or []
+
+        location = source_id.get("channel_name") or source_id.get("chat_name") or ""
+        lines = [
+            f"Thread Transcript",
+            f"Type: {segment_type}",
+            f"Location: {location}",
+            f"Started by: {started_by}",
+            f"Participants: {', '.join(participants) if isinstance(participants, list) else str(participants)}",
+            f"Start: {started_at}",
+            f"End: {last_at}",
+            "",
+            "--- CONVERSATION ---",
+            "",
+            clarified or "(no clarified content available)",
+        ]
+        return {"transcript": "\n".join(lines), "thread_id": thread_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"get_thread_transcript failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

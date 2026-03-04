@@ -112,10 +112,18 @@ export const devopsStats = {
 };
 
 export const threads = {
-  list: (projectId: string, limit = 50, offset = 0) =>
-    fetchWithAuth(`${AI_API}/threads?project_id=${projectId}&limit=${limit}&offset=${offset}`),
+  list: (projectId: string, filters: Record<string, string> = {}) => {
+    const params = new URLSearchParams({ project_id: projectId, limit: "200", ...filters });
+    return fetchWithAuth(`${AI_API}/threads?${params.toString()}`);
+  },
   getWorkItems: (threadId: string) =>
     fetchWithAuth(`${AI_API}/threads/${threadId}/work-items`),
+  getTranscript: (threadId: string) =>
+    fetchWithAuth(`${AI_API}/threads/${threadId}/transcript`),
+  updateStatus: (threadId: string, body: { review_status?: string; viewed?: boolean }) =>
+    fetchWithAuth(`${AI_API}/threads/${threadId}/status`, { method: "PATCH", body: JSON.stringify(body) }),
+  getDataSources: (projectId: string) =>
+    fetchWithAuth(`${AI_API}/threads/data-sources?project_id=${projectId}`),
 };
 
 export const ai = {

@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import hashlib
 import logging
@@ -534,6 +535,9 @@ class VectorOps:
 
         candidates = sorted(scored.values(), key=lambda x: x["sim"], reverse=True)
         logger.info(f"[VectorOps/DevOps] Candidate pool: {len(candidates)} unique DevOps items")
+        for c in candidates:
+            m = re.search(r'\[Work Item #(\d+)\]', c.get("content", ""))
+            c["devops_work_item_id"] = m.group(1) if m else None
         return candidates[:n_results]
 
     def store_work_items(self, work_items: list, thread_id: str,
@@ -555,6 +559,7 @@ class VectorOps:
                 embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
 
                 semantic_data_id = None
+                devops_work_item_id = None
                 logger.info(f"[VectorOps] Checking for existing DevOps match for work item: '{title}'")
                 try:
                     if openai_client:
@@ -568,9 +573,10 @@ class VectorOps:
                                 )
                                 if confirmed:
                                     semantic_data_id = cand["id"]
+                                    devops_work_item_id = cand.get("devops_work_item_id")
                                     logger.info(
                                         f"[VectorOps] → GPT confirmed DevOps match: {semantic_data_id} "
-                                        f"(similarity was {cand['sim']:.3f})"
+                                        f"(work_item_id={devops_work_item_id}, sim={cand['sim']:.3f})"
                                     )
                                     break
                                 else:
@@ -583,7 +589,7 @@ class VectorOps:
                         with self._get_conn() as conn:
                             with conn.cursor() as cur:
                                 cur.execute(
-                                    """SELECT id, 1 - (embedding <=> %s::vector) AS similarity
+                                    """SELECT id, content, 1 - (embedding <=> %s::vector) AS similarity
                                        FROM semantic_data
                                        WHERE tenant_id = %s AND project_id = %s
                                          AND source_type = 'azure_devops'
@@ -594,9 +600,11 @@ class VectorOps:
                                 )
                                 row = cur.fetchone()
                                 if row:
-                                    sim = float(row[1]) if row[1] else 0.0
+                                    sim = float(row[2]) if row[2] else 0.0
                                     if sim >= 0.82:
                                         semantic_data_id = str(row[0])
+                                        m = re.search(r'\[Work Item #(\d+)\]', row[1] or "")
+                                        devops_work_item_id = m.group(1) if m else None
                                         logger.info(f"[VectorOps] → Fallback match: {semantic_data_id} (sim={sim:.3f})")
                                     else:
                                         logger.info(f"[VectorOps] → No fallback match (best sim={sim:.3f})")
@@ -609,14 +617,15 @@ class VectorOps:
                             """INSERT INTO suggested_work_item
                                (tenant_id, project_id, connector_id, data_source_id,
                                 thread_id, title, description, source_message_ids,
-                                embedding, semantic_data_id)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)""",
+                                embedding, semantic_data_id, devops_work_item_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s)""",
                             (
                                 tenant_id, project_id, connector_id, data_source_id,
                                 thread_id, title, description,
                                 source_message_ids if source_message_ids else [],
                                 embedding_str,
                                 semantic_data_id,
+                                devops_work_item_id,
                             ),
                         )
                         if source_message_ids:
