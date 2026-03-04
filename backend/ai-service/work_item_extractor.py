@@ -20,8 +20,17 @@ class WorkItemExtractor:
                         "role": "system",
                         "content": (
                             "You analyze messages from Teams chats (which may be in Hindi, Hinglish, or English) "
-                            "to determine if they imply that a work item (bug, feature request, task, or improvement) "
-                            "needs to be created. Respond with JSON only."
+                            "to determine if they describe a work item that needs to be created or tracked RIGHT NOW. "
+                            "A work item qualifies only if it meets AT LEAST ONE of these criteria: "
+                            "(a) an active or current bug/problem is being reported, "
+                            "(b) someone explicitly requests that a task, ticket, or work item be created, "
+                            "(c) someone is explicitly assigned or asked to do something specific, "
+                            "(d) someone says to note it down, log it, add it to the plan/sprint/backlog, "
+                            "(e) a specific phase, sprint, iteration, date, or time period is mentioned — meaning the item is explicitly scheduled. "
+                            "The following do NOT qualify: future ideas with no timeline, vague aspirational wishes "
+                            "('it would be nice if...', 'maybe someday...', 'we could consider...'), "
+                            "hypothetical discussions, and casual brainstorming with no explicit commitment or schedule. "
+                            "Respond with JSON only."
                         ),
                     },
                     {
@@ -29,20 +38,21 @@ class WorkItemExtractor:
                         "content": (
                             f"Thread context: {thread_context[:400]}\n\n"
                             f"Message: {message_text[:500]}\n\n"
-                            "Does this message explicitly request or clearly imply that a work item (bug, feature, task, "
-                            "or improvement) needs to be created or tracked? "
-                            "Casual conversation, greetings, status updates, and acknowledgements are NOT work items. "
-                            "Respond with JSON only: {\"is_work_item\": true or false}"
+                            "Does this message describe a CURRENT active issue, OR explicitly request/assign/schedule "
+                            "something to be created or tracked right now? "
+                            "Vague future ideas, casual wishes, and unscheduled aspirations are NOT work items. "
+                            "Return JSON only: {\"is_work_item\": true or false, \"reason\": \"brief explanation\"}"
                         ),
                     },
                 ],
                 temperature=0,
-                max_tokens=30,
+                max_tokens=80,
             )
             raw = response.choices[0].message.content.strip()
             data = json.loads(raw)
             result = bool(data.get("is_work_item", False))
-            logger.info(f"[WorkItem] → is_work_item={result}")
+            reason = data.get("reason", "")
+            logger.info(f"[WorkItem] → is_work_item={result} reason='{reason}'")
             return result
         except Exception as e:
             logger.warning(f"[WorkItem] check_message_for_work_item error: {e}")
@@ -60,25 +70,37 @@ class WorkItemExtractor:
                         "role": "system",
                         "content": (
                             "You analyze translated Teams conversations to identify actionable work items. "
-                            "A work item is a clearly implied bug, feature request, task, or improvement. "
-                            "Casual chat, greetings, and vague references are NOT work items. "
-                            "Be conservative — only flag clear, actionable items. Respond with JSON only."
+                            "Only extract a work item if it meets AT LEAST ONE of these criteria: "
+                            "(a) an active/current bug or problem is being reported, "
+                            "(b) someone explicitly requests that a task, ticket, or work item be created, "
+                            "(c) someone is explicitly assigned or asked to do something specific, "
+                            "(d) someone explicitly says to note it down, log it, or add it to the plan/sprint/backlog, "
+                            "(e) a specific phase, sprint, iteration, date, month, or time period is mentioned in connection with the item — meaning it is explicitly scheduled. "
+                            "Do NOT extract: future unscheduled ideas, vague aspirational wishes ('it would be nice if...', "
+                            "'maybe someday...', 'we could consider...'), hypothetical discussions, or casual brainstorming "
+                            "with no explicit commitment, assignment, or timeline. "
+                            "Be conservative — only flag clear, immediately actionable or explicitly scheduled items. "
+                            "Respond with JSON only."
                         ),
                     },
                     {
                         "role": "user",
                         "content": (
                             f"Conversation:\n{clarified_content[:3000]}\n\n"
-                            "Does this conversation indicate that one or more work items need to be created or tracked? "
-                            "If yes, provide titles (max 80 chars each) and detailed descriptions. "
+                            "Identify work items that need to be created or tracked. "
+                            "For each, set `is_immediate: true` if it is a current active issue, explicitly assigned, "
+                            "explicitly asked to be tracked/logged, OR tied to a specific phase/sprint/iteration/date/month/period. "
+                            "Set `is_immediate: false` if it is a vague future idea, casual wish, or aspiration with no "
+                            "explicit commitment, assignment, or scheduled timeline. "
                             "Return JSON only:\n"
                             "{\"has_work_items\": true or false, "
-                            "\"work_items\": [{\"title\": \"...\", \"description\": \"...\"}]}"
+                            "\"work_items\": [{\"title\": \"...\", \"description\": \"...\", "
+                            "\"is_immediate\": true or false, \"reason\": \"brief explanation\"}]}"
                         ),
                     },
                 ],
                 temperature=0,
-                max_tokens=800,
+                max_tokens=1000,
             )
             raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
@@ -87,13 +109,23 @@ class WorkItemExtractor:
                     raw = raw[4:]
             data = json.loads(raw)
             has = data.get("has_work_items", False)
-            items = data.get("work_items", []) if has else []
-            parsed = [
-                {"title": str(item.get("title", ""))[:80], "description": str(item.get("description", ""))}
-                for item in items
-                if item.get("title")
-            ]
-            logger.info(f"[WorkItem] → has_work_items={has} items={[i['title'] for i in parsed]}")
+            all_items = data.get("work_items", []) if has else []
+            parsed = []
+            for item in all_items:
+                title = str(item.get("title", ""))[:80]
+                if not title:
+                    continue
+                is_immediate = bool(item.get("is_immediate", True))
+                reason = item.get("reason", "")
+                if is_immediate:
+                    logger.info(f"[WorkItem] → keeping '{title}' (immediate: {reason})")
+                    parsed.append({
+                        "title": title,
+                        "description": str(item.get("description", "")),
+                    })
+                else:
+                    logger.info(f"[WorkItem] → skipping '{title}' (not immediate: {reason})")
+            logger.info(f"[WorkItem] → has_work_items={has} kept={len(parsed)}/{len(all_items)}")
             return parsed
         except Exception as e:
             logger.warning(f"[WorkItem] extract_work_items_from_thread error: {e}")
