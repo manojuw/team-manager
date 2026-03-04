@@ -13,6 +13,7 @@ from encryption import decrypt_config
 from azure_devops_client import AzureDevOpsClient
 from thread_engine import ThreadEngine, _parse_dt
 from message_processor import MessageProcessor
+from work_item_extractor import WorkItemExtractor
 from audio_processor import AudioProcessor
 from openai import OpenAI as _OpenAI
 
@@ -213,6 +214,15 @@ class SyncScheduler:
                         thread["id"], msg_ids, connector_id, ds_id
                     )
 
+            extractor = WorkItemExtractor(openai_client=openai_client)
+            for pt in processed_chat + processed_meeting:
+                work_items = extractor.analyze_thread(pt)
+                if work_items:
+                    self.vector_ops.store_work_items(
+                        work_items, pt["id"],
+                        tenant_id, project_id, connector_id, ds_id
+                    )
+
             self._record_sync(tenant_id, project_id, connector_id, ds_id,
                               meeting_added + chat_added, len(messages), "microsoft_teams", "team_channel")
 
@@ -274,6 +284,15 @@ class SyncScheduler:
                 if msg_ids:
                     self.vector_ops.update_thread_message_thread_ids(
                         thread["id"], msg_ids, connector_id, ds_id
+                    )
+
+            extractor = WorkItemExtractor(openai_client=openai_client)
+            for pt in processed_chat + processed_meeting:
+                work_items = extractor.analyze_thread(pt)
+                if work_items:
+                    self.vector_ops.store_work_items(
+                        work_items, pt["id"],
+                        tenant_id, project_id, connector_id, ds_id
                     )
 
             self._record_sync(tenant_id, project_id, connector_id, ds_id,

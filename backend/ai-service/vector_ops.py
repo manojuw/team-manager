@@ -411,6 +411,120 @@ class VectorOps:
             logger.error(f"[VectorOps] Last sync query failed: {e}")
         return "Never"
 
+    def store_work_items(self, work_items: list, thread_id: str,
+                         tenant_id: str, project_id: str,
+                         connector_id: str = None, data_source_id: str = None) -> int:
+        if not work_items:
+            return 0
+        stored = 0
+        for item in work_items:
+            title = item.get("title", "")
+            description = item.get("description", "")
+            source_message_ids = item.get("source_message_ids", [])
+            if not title:
+                continue
+            try:
+                embed_text = f"{title}. {description}"[:2000]
+                embedding = get_embedding(embed_text)
+                embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+                with self._get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """INSERT INTO suggested_work_item
+                               (tenant_id, project_id, connector_id, data_source_id,
+                                thread_id, title, description, source_message_ids, embedding)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector)""",
+                            (
+                                tenant_id, project_id, connector_id, data_source_id,
+                                thread_id, title, description,
+                                source_message_ids if source_message_ids else [],
+                                embedding_str,
+                            ),
+                        )
+                        if source_message_ids:
+                            cur.execute(
+                                """UPDATE thread_message SET is_work_item_related = TRUE
+                                   WHERE message_id = ANY(%s)
+                                   AND connector_id IS NOT DISTINCT FROM %s
+                                   AND data_source_id IS NOT DISTINCT FROM %s""",
+                                (source_message_ids, connector_id, data_source_id),
+                            )
+                    conn.commit()
+                stored += 1
+            except Exception as e:
+                logger.error(f"[VectorOps] Failed to store work item '{title}': {e}")
+        logger.info(f"[VectorOps] Stored {stored} suggested work item(s) for thread {thread_id}")
+        return stored
+
+    def search_work_items(self, query: str, project_id: str, tenant_id: str, n_results: int = 10) -> list:
+        try:
+            embedding = get_embedding(query)
+        except Exception as e:
+            logger.error(f"[VectorOps] Work item search embedding failed: {e}")
+            return []
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        results = []
+
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT id, title, description, status, thread_id, created_at,
+                                  1 - (embedding <=> %s::vector) AS relevance
+                           FROM suggested_work_item
+                           WHERE tenant_id = %s AND project_id = %s
+                             AND embedding IS NOT NULL
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT %s""",
+                        (embedding_str, tenant_id, project_id, embedding_str, n_results),
+                    )
+                    for row in cur.fetchall():
+                        results.append({
+                            "id": str(row[0]),
+                            "title": row[1],
+                            "description": row[2],
+                            "status": row[3],
+                            "thread_id": str(row[4]) if row[4] else None,
+                            "created_at": str(row[5]) if row[5] else None,
+                            "source": "suggested",
+                            "relevance": float(row[6]) if row[6] else 0.0,
+                        })
+        except Exception as e:
+            logger.error(f"[VectorOps] search_work_items (suggested) failed: {e}")
+
+        try:
+            with self._get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT id, content, sender, created_at, message_id,
+                                  1 - (embedding <=> %s::vector) AS relevance
+                           FROM semantic_data
+                           WHERE tenant_id = %s AND project_id = %s
+                             AND source_type = 'azure_devops'
+                           ORDER BY embedding <=> %s::vector
+                           LIMIT %s""",
+                        (embedding_str, tenant_id, project_id, embedding_str, n_results),
+                    )
+                    for row in cur.fetchall():
+                        content = row[1] or ""
+                        lines = content.splitlines()
+                        title = lines[0][:80] if lines else content[:80]
+                        results.append({
+                            "id": str(row[0]),
+                            "title": title,
+                            "description": content[:500],
+                            "status": None,
+                            "thread_id": None,
+                            "created_at": str(row[3]) if row[3] else None,
+                            "source": "azure_devops",
+                            "relevance": float(row[5]) if row[5] else 0.0,
+                        })
+        except Exception as e:
+            logger.error(f"[VectorOps] search_work_items (semantic_data) failed: {e}")
+
+        results.sort(key=lambda r: r["relevance"], reverse=True)
+        return results[:n_results]
+
     def clear_project(self, project_id: str, tenant_id: str):
         try:
             with self._get_conn() as conn:

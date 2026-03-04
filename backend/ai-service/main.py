@@ -26,6 +26,8 @@ from devops_sync import fetch_devops_work_items_as_messages
 from thread_engine import ThreadEngine, _parse_dt
 from message_processor import MessageProcessor
 from audio_processor import AudioProcessor
+from work_item_extractor import WorkItemExtractor
+from work_item_search import WorkItemSearch
 from openai import OpenAI as _OpenAI
 
 _audio_processor = AudioProcessor()
@@ -48,8 +50,48 @@ JWT_SECRET = os.environ.get("SESSION_SECRET", "fallback-secret-key")
 scheduler = SyncScheduler()
 
 
+def _run_migrations():
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        with conn.cursor() as cur:
+            cur.execute("""
+                ALTER TABLE thread_message
+                  ADD COLUMN IF NOT EXISTS is_work_item_related BOOLEAN DEFAULT FALSE
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS suggested_work_item (
+                  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                  tenant_id         UUID NOT NULL,
+                  project_id        VARCHAR NOT NULL,
+                  connector_id      UUID,
+                  data_source_id    UUID,
+                  thread_id         UUID,
+                  title             TEXT NOT NULL,
+                  description       TEXT,
+                  status            VARCHAR(50) DEFAULT 'pending',
+                  source_message_ids TEXT[],
+                  embedding         vector(1536),
+                  created_at        TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_suggested_wi_thread
+                  ON suggested_work_item(thread_id)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_suggested_wi_tenant
+                  ON suggested_work_item(tenant_id, project_id)
+            """)
+        conn.commit()
+        conn.close()
+        logger.info("[Migration] Migrations applied successfully")
+    except Exception as e:
+        logger.error(f"[Migration] Migration failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _run_migrations()
     scheduler.start()
     logger.info("Background sync scheduler started")
     yield
@@ -313,6 +355,15 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
                 thread["id"], msg_ids, req.connector_id, req.data_source_id
             )
 
+    extractor = WorkItemExtractor(openai_client=openai_client)
+    for pt in processed_chat + processed_meeting:
+        work_items = extractor.analyze_thread(pt)
+        if work_items:
+            vector_ops.store_work_items(
+                work_items, pt["id"],
+                tenant_id, req.project_id, req.connector_id, req.data_source_id
+            )
+
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
                          added, len(messages), "microsoft_teams", "team_channel")
 
@@ -395,6 +446,15 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
         if msg_ids:
             vector_ops.update_thread_message_thread_ids(
                 thread["id"], msg_ids, req.connector_id, req.data_source_id
+            )
+
+    extractor = WorkItemExtractor(openai_client=openai_client)
+    for pt in processed_chat + processed_meeting:
+        work_items = extractor.analyze_thread(pt)
+        if work_items:
+            vector_ops.store_work_items(
+                work_items, pt["id"],
+                tenant_id, req.project_id, req.connector_id, req.data_source_id
             )
 
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
@@ -590,6 +650,20 @@ def summarize(req: SummarizeRequest, user=Depends(verify_token)):
 @app.get("/api/stats/{project_id}")
 def get_stats(project_id: str, user=Depends(verify_token)):
     return vector_ops.get_stats(project_id, user["tenantId"])
+
+
+class FindWorkItemRequest(BaseModel):
+    query: str
+    project_id: str
+
+
+@app.post("/api/find-work-item")
+def find_work_item(req: FindWorkItemRequest, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    openai_client = _make_openai_client()
+    searcher = WorkItemSearch(openai_client=openai_client, vector_ops=vector_ops)
+    result = searcher.find(req.query, req.project_id, tenant_id)
+    return result
 
 
 @app.delete("/api/project-data/{project_id}")
