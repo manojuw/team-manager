@@ -536,8 +536,11 @@ class VectorOps:
         candidates = sorted(scored.values(), key=lambda x: x["sim"], reverse=True)
         logger.info(f"[VectorOps/DevOps] Candidate pool: {len(candidates)} unique DevOps items")
         for c in candidates:
-            m = re.search(r'\[Work Item #(\d+)\]', c.get("content", ""))
-            c["devops_work_item_id"] = m.group(1) if m else None
+            first_line = c.get("content", "").split("\n")[0]
+            m_id = re.search(r'\[Work Item #(\d+)\]', first_line)
+            c["devops_work_item_id"] = m_id.group(1) if m_id else None
+            m_title = re.search(r'\[Work Item #\d+\] (.+)', first_line)
+            c["devops_work_item_title"] = m_title.group(1).strip() if m_title else None
         return candidates[:n_results]
 
     def store_work_items(self, work_items: list, thread_id: str,
@@ -560,6 +563,7 @@ class VectorOps:
 
                 semantic_data_id = None
                 devops_work_item_id = None
+                devops_work_item_title = None
                 logger.info(f"[VectorOps] Checking for existing DevOps match for work item: '{title}'")
                 try:
                     if openai_client:
@@ -574,6 +578,7 @@ class VectorOps:
                                 if confirmed:
                                     semantic_data_id = cand["id"]
                                     devops_work_item_id = cand.get("devops_work_item_id")
+                                    devops_work_item_title = cand.get("devops_work_item_title")
                                     logger.info(
                                         f"[VectorOps] → GPT confirmed DevOps match: {semantic_data_id} "
                                         f"(work_item_id={devops_work_item_id}, sim={cand['sim']:.3f})"
@@ -603,8 +608,11 @@ class VectorOps:
                                     sim = float(row[2]) if row[2] else 0.0
                                     if sim >= 0.82:
                                         semantic_data_id = str(row[0])
-                                        m = re.search(r'\[Work Item #(\d+)\]', row[1] or "")
-                                        devops_work_item_id = m.group(1) if m else None
+                                        first_line = (row[1] or "").split("\n")[0]
+                                        m_id = re.search(r'\[Work Item #(\d+)\]', first_line)
+                                        devops_work_item_id = m_id.group(1) if m_id else None
+                                        m_title = re.search(r'\[Work Item #\d+\] (.+)', first_line)
+                                        devops_work_item_title = m_title.group(1).strip() if m_title else None
                                         logger.info(f"[VectorOps] → Fallback match: {semantic_data_id} (sim={sim:.3f})")
                                     else:
                                         logger.info(f"[VectorOps] → No fallback match (best sim={sim:.3f})")
@@ -617,8 +625,8 @@ class VectorOps:
                             """INSERT INTO suggested_work_item
                                (tenant_id, project_id, connector_id, data_source_id,
                                 thread_id, title, description, source_message_ids,
-                                embedding, semantic_data_id, devops_work_item_id)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s)""",
+                                embedding, semantic_data_id, devops_work_item_id, devops_work_item_title)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s)""",
                             (
                                 tenant_id, project_id, connector_id, data_source_id,
                                 thread_id, title, description,
@@ -626,6 +634,7 @@ class VectorOps:
                                 embedding_str,
                                 semantic_data_id,
                                 devops_work_item_id,
+                                devops_work_item_title,
                             ),
                         )
                         if source_message_ids:

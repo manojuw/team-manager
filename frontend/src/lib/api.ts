@@ -105,6 +105,8 @@ export const devops = {
     fetchWithAuth(`${AI_API}/devops/list-iterations`, { method: "POST", body: JSON.stringify({ connector_id: connectorId, project_name: projectName }) }),
   syncProject: (data: { project_id: string; connector_id: string; data_source_id?: string; devops_project_id: string; devops_project_name: string }) =>
     fetchWithAuth(`${AI_API}/sync/devops-project`, { method: "POST", body: JSON.stringify(data) }),
+  getWorkItemDetail: (semanticDataId: string, workItemId: string) =>
+    fetchWithAuth(`${AI_API}/devops/work-item-detail?semantic_data_id=${encodeURIComponent(semanticDataId)}&work_item_id=${encodeURIComponent(workItemId)}`),
 };
 
 export const devopsStats = {

@@ -99,6 +99,7 @@ def _run_migrations():
             cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS review_status VARCHAR(50) DEFAULT 'pending'")
             cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS viewed BOOLEAN DEFAULT FALSE")
             cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS devops_work_item_id TEXT")
+            cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS devops_work_item_title TEXT")
         conn.commit()
         conn.close()
         logger.info("[Migration] Migrations applied successfully")
@@ -148,11 +149,12 @@ def _retro_match_work_items():
             if linked:
                 linked_cand = next((c for c in candidates if c["id"] == linked), {})
                 wi_id = linked_cand.get("devops_work_item_id")
+                wi_title = linked_cand.get("devops_work_item_title")
                 conn = psycopg2.connect(DATABASE_URL)
                 with conn.cursor() as cur:
                     cur.execute(
-                        "UPDATE suggested_work_item SET semantic_data_id = %s, devops_work_item_id = %s WHERE id = %s",
-                        (linked, wi_id, item_id),
+                        "UPDATE suggested_work_item SET semantic_data_id = %s, devops_work_item_id = %s, devops_work_item_title = %s WHERE id = %s",
+                        (linked, wi_id, wi_title, item_id),
                     )
                 conn.commit()
                 conn.close()
@@ -939,7 +941,8 @@ def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
         with vector_ops._get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT id, title, description, status, semantic_data_id, created_at, devops_work_item_id
+                    """SELECT id, title, description, status, semantic_data_id, created_at,
+                              devops_work_item_id, devops_work_item_title
                        FROM suggested_work_item
                        WHERE thread_id = %s AND tenant_id = %s
                        ORDER BY created_at""",
@@ -956,11 +959,51 @@ def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
                 "semantic_data_id": row[4],
                 "linked_to_devops": bool(row[4]),
                 "devops_work_item_id": row[6],
+                "devops_work_item_title": row[7],
                 "created_at": row[5].isoformat() if row[5] else None,
             })
         return {"work_items": result}
     except Exception as e:
         logger.error(f"get_thread_work_items failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/devops/work-item-detail")
+def get_devops_work_item_detail(semantic_data_id: str, work_item_id: str, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT connector_id, source_identifier
+                       FROM semantic_data
+                       WHERE id = %s AND tenant_id = %s""",
+                    (semantic_data_id, tenant_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Semantic data not found")
+        connector_id = str(row[0])
+        source_identifier = row[1] or {}
+        organization = source_identifier.get("organization", "")
+        project_name = source_identifier.get("project_name", "")
+        if not organization or not project_name:
+            raise HTTPException(status_code=400, detail="Missing organization or project in source identifier")
+        client = _get_devops_client(connector_id, tenant_id)
+        details_list = client.get_work_item_details(project_name, [int(work_item_id)])
+        if not details_list:
+            raise HTTPException(status_code=404, detail="Work item not found in DevOps")
+        detail = details_list[0]
+        web_url = f"https://dev.azure.com/{organization}/{project_name}/_workitems/edit/{work_item_id}"
+        detail["web_url"] = web_url
+        return detail
+    except HTTPException:
+        raise
+    except DevOpsApiError as e:
+        logger.error(f"[DevOps] work-item-detail error: {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"[DevOps] work-item-detail unexpected error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

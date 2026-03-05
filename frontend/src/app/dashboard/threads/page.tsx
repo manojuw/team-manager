@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useProject } from "@/hooks/use-project";
-import { threads as threadsApi, dataSources } from "@/lib/api";
+import { threads as threadsApi, dataSources, devops as devopsApi } from "@/lib/api";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -31,6 +31,12 @@ import {
   EyeOff,
   Filter,
   Clock,
+  ExternalLink,
+  ChevronDown,
+  ChevronUp,
+  User,
+  Tag,
+  BarChart2,
 } from "lucide-react";
 
 interface Thread {
@@ -61,7 +67,29 @@ interface WorkItem {
   semantic_data_id: string | null;
   linked_to_devops: boolean;
   devops_work_item_id: string | null;
+  devops_work_item_title: string | null;
   created_at: string | null;
+}
+
+interface DevOpsDetail {
+  id: number;
+  title: string;
+  description: string;
+  state: string;
+  work_item_type: string;
+  assigned_to: string;
+  priority: number;
+  story_points: number | null;
+  original_estimate: number | null;
+  remaining_work: number | null;
+  completed_work: number | null;
+  iteration_path: string;
+  area_path: string;
+  created_date: string;
+  changed_date: string;
+  acceptance_criteria: string;
+  tags: string;
+  web_url: string;
 }
 
 interface DataSource {
@@ -191,6 +219,9 @@ export default function ThreadsPage() {
   const [downloadingTranscript, setDownloadingTranscript] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
   const [availableDataSources, setAvailableDataSources] = useState<DataSource[]>([]);
+  const [expandedWorkItem, setExpandedWorkItem] = useState<string | null>(null);
+  const [devopsDetailCache, setDevopsDetailCache] = useState<Record<string, DevOpsDetail | null>>({});
+  const [loadingDevopsDetail, setLoadingDevopsDetail] = useState<Record<string, boolean>>({});
 
   const [filterDataSource, setFilterDataSource] = useState("all");
   const [filterSegmentType, setFilterSegmentType] = useState("all");
@@ -251,6 +282,9 @@ export default function ThreadsPage() {
     setSelectedThread(thread);
     setWorkItems([]);
     setLoadingWorkItems(true);
+    setExpandedWorkItem(null);
+    setDevopsDetailCache({});
+    setLoadingDevopsDetail({});
 
     if (!thread.viewed) {
       try {
@@ -271,6 +305,31 @@ export default function ThreadsPage() {
       setLoadingWorkItems(false);
     }
   }, []);
+
+  async function toggleWorkItemDetail(item: WorkItem) {
+    const key = item.id;
+    if (expandedWorkItem === key) {
+      setExpandedWorkItem(null);
+      return;
+    }
+    setExpandedWorkItem(key);
+    if (devopsDetailCache[key] !== undefined) return;
+    if (!item.semantic_data_id || !item.devops_work_item_id) return;
+    setLoadingDevopsDetail(prev => ({ ...prev, [key]: true }));
+    try {
+      const data = await devopsApi.getWorkItemDetail(item.semantic_data_id, item.devops_work_item_id);
+      setDevopsDetailCache(prev => ({ ...prev, [key]: data }));
+    } catch {
+      toast.error("Failed to load DevOps work item details");
+      setDevopsDetailCache(prev => ({ ...prev, [key]: null }));
+    } finally {
+      setLoadingDevopsDetail(prev => ({ ...prev, [key]: false }));
+    }
+  }
+
+  function stripHtml(html: string): string {
+    return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  }
 
   async function handleReviewStatus(status: string) {
     if (!selectedThread) return;
@@ -691,40 +750,173 @@ export default function ThreadsPage() {
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {workItems.map((item) => (
-                        <div key={item.id} className="rounded-lg border bg-card p-4">
-                          <div className="flex items-start justify-between gap-2">
-                            <p className="text-sm font-medium leading-snug">{item.title}</p>
-                            <div className="flex items-center gap-1.5 flex-shrink-0">
-                              {item.linked_to_devops && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 border border-green-200">
-                                  <GitBranch className="h-3 w-3" />
-                                  {item.devops_work_item_id ? `#${item.devops_work_item_id}` : "DevOps"}
-                                </span>
+                      {workItems.map((item) => {
+                        const isExpanded = expandedWorkItem === item.id;
+                        const detail: DevOpsDetail | null | undefined = devopsDetailCache[item.id];
+                        const isLoadingDetail = loadingDevopsDetail[item.id];
+                        return (
+                          <div key={item.id} className="rounded-lg border bg-card overflow-hidden">
+                            <div className="p-4">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm font-medium leading-snug">{item.title}</p>
+                                  {item.linked_to_devops && item.devops_work_item_title && (
+                                    <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                                      DevOps: {item.devops_work_item_title}
+                                    </p>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5 flex-shrink-0">
+                                  {item.linked_to_devops && (
+                                    <>
+                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 border border-green-200">
+                                        <GitBranch className="h-3 w-3" />
+                                        {item.devops_work_item_id ? `#${item.devops_work_item_id}` : "DevOps"}
+                                      </span>
+                                      <button
+                                        onClick={() => toggleWorkItemDetail(item)}
+                                        className={`p-1 rounded hover:bg-muted transition-colors ${isExpanded ? "text-primary" : "text-muted-foreground"}`}
+                                        title={isExpanded ? "Hide details" : "Show DevOps details"}
+                                      >
+                                        {isExpanded ? <ChevronUp className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                      </button>
+                                    </>
+                                  )}
+                                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium border ${
+                                    item.status === "done"
+                                      ? "bg-green-100 text-green-700 border-green-200"
+                                      : item.status === "in_progress"
+                                      ? "bg-yellow-100 text-yellow-700 border-yellow-200"
+                                      : "bg-gray-100 text-gray-600 border-gray-200"
+                                  }`}>
+                                    {item.status}
+                                  </span>
+                                </div>
+                              </div>
+                              {item.description && (
+                                <p className="text-xs text-muted-foreground mt-2 leading-relaxed line-clamp-3">
+                                  {item.description}
+                                </p>
                               )}
-                              <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium border ${
-                                item.status === "done"
-                                  ? "bg-green-100 text-green-700 border-green-200"
-                                  : item.status === "in_progress"
-                                  ? "bg-yellow-100 text-yellow-700 border-yellow-200"
-                                  : "bg-gray-100 text-gray-600 border-gray-200"
-                              }`}>
-                                {item.status}
-                              </span>
+                              {item.created_at && (
+                                <p className="text-xs text-muted-foreground mt-2">
+                                  {formatDate(item.created_at)}
+                                </p>
+                              )}
                             </div>
+
+                            {/* DevOps detail panel */}
+                            {isExpanded && (
+                              <div className="border-t bg-muted/30 p-4 space-y-3">
+                                {isLoadingDetail ? (
+                                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    Loading DevOps details…
+                                  </div>
+                                ) : detail === null ? (
+                                  <p className="text-sm text-destructive">Failed to load details.</p>
+                                ) : detail ? (
+                                  <>
+                                    {/* Top badges row */}
+                                    <div className="flex flex-wrap gap-2">
+                                      {detail.state && (
+                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200">
+                                          {detail.state}
+                                        </span>
+                                      )}
+                                      {detail.work_item_type && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-700 border border-purple-200">
+                                          <Tag className="h-3 w-3" />
+                                          {detail.work_item_type}
+                                        </span>
+                                      )}
+                                      {detail.priority != null && (
+                                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700 border border-orange-200">
+                                          <BarChart2 className="h-3 w-3" />
+                                          P{detail.priority}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    {/* Fields grid */}
+                                    <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+                                      {detail.assigned_to && (
+                                        <div>
+                                          <span className="text-muted-foreground flex items-center gap-1"><User className="h-3 w-3" /> Assigned To</span>
+                                          <span className="font-medium">{detail.assigned_to}</span>
+                                        </div>
+                                      )}
+                                      {detail.iteration_path && (
+                                        <div>
+                                          <span className="text-muted-foreground">Iteration</span>
+                                          <p className="font-medium truncate" title={detail.iteration_path}>{detail.iteration_path.split("\\").pop()}</p>
+                                        </div>
+                                      )}
+                                      {detail.story_points != null && (
+                                        <div>
+                                          <span className="text-muted-foreground">Story Points</span>
+                                          <p className="font-medium">{detail.story_points}</p>
+                                        </div>
+                                      )}
+                                      {detail.original_estimate != null && (
+                                        <div>
+                                          <span className="text-muted-foreground">Original Est.</span>
+                                          <p className="font-medium">{detail.original_estimate}h</p>
+                                        </div>
+                                      )}
+                                      {detail.remaining_work != null && (
+                                        <div>
+                                          <span className="text-muted-foreground">Remaining</span>
+                                          <p className="font-medium">{detail.remaining_work}h</p>
+                                        </div>
+                                      )}
+                                      {detail.completed_work != null && (
+                                        <div>
+                                          <span className="text-muted-foreground">Completed</span>
+                                          <p className="font-medium">{detail.completed_work}h</p>
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {/* Description */}
+                                    {detail.description && (
+                                      <div>
+                                        <p className="text-xs text-muted-foreground mb-1">Description</p>
+                                        <p className="text-xs leading-relaxed line-clamp-4">
+                                          {stripHtml(detail.description)}
+                                        </p>
+                                      </div>
+                                    )}
+
+                                    {/* Acceptance Criteria */}
+                                    {detail.acceptance_criteria && (
+                                      <div>
+                                        <p className="text-xs text-muted-foreground mb-1">Acceptance Criteria</p>
+                                        <p className="text-xs leading-relaxed line-clamp-4">
+                                          {stripHtml(detail.acceptance_criteria)}
+                                        </p>
+                                      </div>
+                                    )}
+
+                                    {/* Open in DevOps */}
+                                    {detail.web_url && (
+                                      <a
+                                        href={detail.web_url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
+                                      >
+                                        <ExternalLink className="h-3.5 w-3.5" />
+                                        Open in DevOps
+                                      </a>
+                                    )}
+                                  </>
+                                ) : null}
+                              </div>
+                            )}
                           </div>
-                          {item.description && (
-                            <p className="text-xs text-muted-foreground mt-2 leading-relaxed line-clamp-3">
-                              {item.description}
-                            </p>
-                          )}
-                          {item.created_at && (
-                            <p className="text-xs text-muted-foreground mt-2">
-                              {formatDate(item.created_at)}
-                            </p>
-                          )}
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
                 </div>
