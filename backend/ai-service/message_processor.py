@@ -263,7 +263,20 @@ class MessageProcessor:
                         except Exception as e:
                             logger.warning(f"[Processor] Meeting video transcription failed: {e}")
 
-        return "\n".join(parts) if parts else "Meeting event (no details available)"
+        has_transcript = any(
+            p.startswith("Meeting Recording Transcript:")
+            or p.startswith("Meeting Audio Transcript:")
+            or p.startswith("Meeting Video Transcript:")
+            for p in parts
+        )
+        if not has_transcript:
+            logger.info(
+                f"[Processor] Meeting thread has no transcript content — skipping "
+                f"(only event metadata: {len(parts)} part(s))"
+            )
+            return ""
+
+        return "\n".join(parts)
 
     def _collect_thread_content(self, thread: dict) -> str:
         if thread.get("is_meeting"):
@@ -453,6 +466,11 @@ class MessageProcessor:
         except AudioTranscriptionRequired as e:
             logger.info(f"[Processor] Dropping thread — audio transcription failed for: {e}")
             return None
+
+        if thread.get("is_meeting") and not raw_text.strip():
+            logger.info("[Processor] Dropping meeting thread — no transcript could be extracted")
+            return None
+
         clarified = self.clarify_thread(raw_text)
         embedding = self.embed_text(clarified) if clarified else []
         plan = self._generate_thread_plan(clarified) if clarified else {"summary": "", "task_planning": ""}
