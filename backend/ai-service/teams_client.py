@@ -390,6 +390,40 @@ class TeamsClient:
             logger.warning(f"Failed to download via sharing URL: {e}")
             return b""
 
+    def get_recording_from_sharing_url(self, sharepoint_url: str) -> bytes:
+        sharing_token = self._encode_sharing_url(sharepoint_url)
+
+        direct_url = f"{GRAPH_API_BASE}/shares/{sharing_token}/driveItem/content"
+        try:
+            data = self._get_raw(direct_url)
+            if data:
+                logger.info(f"[TeamsClient] Downloaded recording via sharing URL content endpoint ({len(data)} bytes)")
+                return data
+        except Exception as e:
+            logger.warning(f"[TeamsClient] Direct sharing URL download failed: {e}")
+
+        try:
+            meta_url = f"{GRAPH_API_BASE}/shares/{sharing_token}/driveItem"
+            self._ensure_token()
+            headers = {"Authorization": f"Bearer {self.access_token}"}
+            meta_resp = requests.get(meta_url, headers=headers)
+            meta_resp.raise_for_status()
+            meta = meta_resp.json()
+            download_url = meta.get("@microsoft.graph.downloadUrl", "")
+            if download_url:
+                logger.info(f"[TeamsClient] Got pre-auth download URL from driveItem metadata, downloading")
+                dl_resp = requests.get(download_url, timeout=120)
+                dl_resp.raise_for_status()
+                data = dl_resp.content
+                if data:
+                    logger.info(f"[TeamsClient] Downloaded recording via driveItem downloadUrl ({len(data)} bytes)")
+                    return data
+        except Exception as e:
+            logger.warning(f"[TeamsClient] driveItem metadata fallback failed: {e}")
+
+        logger.warning(f"[TeamsClient] All download methods failed for recording URL: {sharepoint_url[:80]}")
+        return b""
+
     def download_attachment_content(self, content_url: str) -> bytes:
         if "sharepoint.com" in content_url or "sharepoint.us" in content_url:
             result = self.download_via_sharing_url(content_url)
