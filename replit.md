@@ -1,150 +1,7 @@
 # Teams Knowledge Base
 
 ## Overview
-A multi-tenant knowledge base application that connects to Microsoft Teams and Azure DevOps, extracts conversations, work items, and meeting transcripts, indexes them in a PostgreSQL + pgvector database, and provides AI-powered Q&A. Features multi-tenancy with login/signup, per-tenant data isolation, and background data ingestion on configurable intervals.
-
-## Architecture
-- **Frontend**: Next.js 14 + shadcn/ui (port 5001, proxied through port 5000)
-- **Management API**: NestJS with TypeORM (port 3001) — handles auth, projects, connectors, data sources, sync
-- **AI Service**: FastAPI + Python (port 8001) — handles Teams API calls, Azure DevOps API, vector operations, AI Q&A
-- **Proxy**: Python reverse proxy on port 5000 routes traffic to all services
-- **Database**: PostgreSQL + pgvector (Replit built-in)
-- **Embeddings**: fastembed BAAI/bge-small-en-v1.5 (384 dimensions, local)
-- **AI**: OpenAI via Replit AI Integrations
-
-## Data Hierarchy
-- **Connector**: Top-level connection config (e.g., Microsoft Teams with Azure AD credentials, or Azure DevOps with PAT/Azure AD). Stores encrypted credentials.
-- **Data Source**: Individual syncable segment under a connector (e.g., one Teams channel, one group chat, or one DevOps project). Has its own sync settings (interval, enabled, last_sync_at).
-- One connector can have many data sources.
-- **Connector Types**: `microsoft_teams` (Teams channels/chats), `azure_devops` (DevOps projects/work items)
-
-## Backend Architecture (NestJS)
-Follows SOLID principles with clean separation of concerns:
-- **Modules**: AuthModule, ProjectsModule, ConnectorsModule, DataSourcesModule, SyncModule, HealthModule, DatabaseModule
-- **Pattern**: Controller → Service → Repository (TypeORM)
-- **Auth**: JWT strategy with Passport, bcrypt password hashing, JwtAuthGuard
-- **Validation**: DTOs with class-validator, global ValidationPipe
-- **Tenant Isolation**: Every query scoped by tenant_id via repository pattern
-- **Secret Encryption**: AES-256-GCM encryption for sensitive config fields (EncryptionService)
-- **Credential Update Merge**: When updating connector credentials, empty fields are preserved from existing stored values
-
-### Key Backend Files
-- `backend/management/src/main.ts` — NestJS entry point (port 3001)
-- `backend/management/src/app.module.ts` — Root module wiring all feature modules
-- `backend/management/src/modules/auth/` — Auth module (signup, login, JWT strategy)
-- `backend/management/src/modules/projects/` — Projects CRUD with tenant scoping
-- `backend/management/src/modules/connectors/` — Connector CRUD with encrypted secrets, credential merge on update
-- `backend/management/src/modules/datasources/` — Data sources management under connectors
-- `backend/management/src/modules/sync/` — Sync history and status
-- `backend/management/src/modules/database/entities/` — TypeORM entities (Tenant, User, Project, Connector, DataSource, SemanticData, SyncMetadata, SyncHistory)
-- `backend/management/src/common/services/encryption.service.ts` — AES-256-GCM encryption/decryption for config secrets
-
-### Key Frontend Files
-- `frontend/src/app/dashboard/connectors/page.tsx` — Connectors management with expandable cards, inline data source management
-- `frontend/src/app/` — Next.js pages (login, signup, dashboard tabs)
-- `frontend/src/lib/api.ts` — API client with auth token management (connectors, dataSources, teams, ai, sync endpoints)
-- `frontend/src/hooks/use-auth.tsx` — Auth context provider
-- `frontend/src/hooks/use-project.tsx` — Project context provider
-
-### AI Service Files
-- `backend/ai-service/main.py` — FastAPI endpoints for Teams sync, search, Q&A (uses connector_id for credentials)
-- `backend/ai-service/teams_client.py` — Microsoft Graph API client (with VTT attachment detection, meeting event detection, transcript fetch)
-- `backend/ai-service/azure_devops_client.py` — Azure DevOps REST API client (PAT + Azure AD auth, work items, comments, iterations)
-- `backend/ai-service/devops_sync.py` — Converts DevOps work items + comments into indexable messages
-- `backend/ai-service/vector_ops.py` — pgvector operations with connector_id + data_source_id tracking
-- `backend/ai-service/scheduler.py` — Background sync scheduler (iterates data_source rows, joins connector for credentials)
-- `backend/ai-service/encryption.py` — Python decryption utility for encrypted configs
-- `backend/ai-service/vtt_parser.py` — WebVTT parser (speaker extraction, timestamp parsing, segment grouping)
-- `backend/ai-service/transcript_processor.py` — Orchestrates transcript ingestion from VTT attachments and meeting events
-
-## Database Schema (all table names are singular)
-- `tenant` — Multi-tenant organizations (id uuid, name, created_at)
-- `user` — User accounts with tenant association (id uuid, email, password_hash, tenant_id)
-- `project` — Project definitions with tenant isolation (id, name, description, tenant_id)
-- `connector` — Connection configs per project (id, project_id, name, connector_type, config JSONB masked, encrypted_config JSONB encrypted, secrets_updated_at, tenant_id)
-- `data_source` — Individual syncable segments under a connector (id, connector_id, project_id, tenant_id, name, source_type, config JSONB, sync_interval_minutes, sync_enabled, last_sync_at)
-- `semantic_data` — Generic indexed content (id, tenant_id, project_id, connector_id, data_source_id, source_type, segment_type, source_identifier JSONB, content, embedding vector(384), sender, message_type)
-- `sync_history` — Sync operation history (id uuid, tenant_id, project_id, connector_id, data_source_id, source_type, segment_type, status, records_added, records_fetched, error_message)
-
-### Source Types & Segments
-- **microsoft_teams**: team_channel, group_chat
-- Source identifier is JSONB — flexible for any source: `{team_id, team_name, channel_id, channel_name}` or `{chat_id, chat_name}`
-
-### Secret Encryption
-- Sensitive config fields (client_secret, api_key, password, token, secret) are encrypted with AES-256-GCM
-- Key derived from SESSION_SECRET via PBKDF2 (100,000 iterations, SHA-256)
-- Encrypted values stored in `connector.encrypted_config` as `{__encrypted: true, value: "base64..."}`
-- Plain `connector.config` stores masked values only (••••••••)
-- `secrets_updated_at` tracks when secrets were last created/updated
-- Both NestJS (encryption.service.ts) and Python AI service (encryption.py) can encrypt/decrypt
-
-## Configuration
-- Proxy routes: `/api/management/*` → port 3001, `/api/ai/*` → port 8001, all else → port 5001 (Next.js)
-- Startup: `start.sh` launches NestJS (3001), AI service (8001), Next.js (5001), then runs `proxy.py` on port 5000
-- `proxy.py` is a standalone threaded Python HTTP reverse proxy (no Streamlit dependency)
-- JWT secret: SESSION_SECRET environment variable (required)
-- Azure AD credentials stored encrypted per connector in connector.encrypted_config JSONB
-
-## Required Azure AD Permissions
-- `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Read.All`
-- `Chat.Read.All` (for group chats), `User.Read.All` (for user discovery)
-- `Files.Read.All` (for downloading file attachments shared in chats/channels via SharePoint)
-- `OnlineMeetingTranscript.Read.All` (optional, for auto-fetching Teams meeting transcripts — requires admin policy)
-
-## Thread-Aware Ingestion Pipeline (Teams)
-Teams messages go through a 5-stage pipeline before storage:
-1. **Audit insert** (`vector_ops.insert_raw_messages()`): All raw messages inserted immediately into `thread_message` with `thread_id = NULL` — before any processing. Enables tracking of what was received vs processed.
-2. **Meeting/chat split**: Messages with `message_type == "meeting_event"` are extracted into dedicated standalone threads (one thread per meeting). Remaining chat messages continue to thread grouping.
-3. **Thread grouping** (`thread_engine.py`): Chat messages sorted chronologically, grouped by time window (default 60 min) or parent reply. After a gap, OpenAI checks relatedness against last N threads.
-4. **Content collection + clarification** (`message_processor.py`): Per-message content assembled with sender + timestamp. Audio → SarvamAI transcription. Video → MP3 → SarvamAI transcription. Meeting events → metadata + any audio/video transcript. Full thread text clarified by `gpt-4o-mini` (translate to clear English, preserve every detail, no summarization).
-5. **Embedding + storage + back-update** (`vector_ops.py`): Clarified text embedded with `text-embedding-3-small` (1536-dim), stored in `thread` table. Meeting threads stored with `segment_type="meeting"`, chat threads with `"team_channel"` or `"group_chat"`. After storage, `thread_message.thread_id` is back-updated for each message.
-
-No VTT files are processed. Azure DevOps data uses `add_messages()` → `semantic_data` table (unchanged).
-
-## thread_message Audit Table
-- Every Teams message is inserted into `thread_message` immediately on fetch, before threading
-- `thread_id` starts as NULL; updated after the thread is resolved and stored
-- Any `thread_message` row with `thread_id = NULL` after sync = message that was missed/skipped
-- `message_id` is the Teams message ID; unique per `(message_id, connector_id, data_source_id)` — re-syncing won't duplicate rows
-- No FK constraint on `thread_id` by design (soft reference)
-
-## Dependencies
-- **Backend (NestJS)**: @nestjs/core, @nestjs/typeorm, typeorm, @nestjs/jwt, passport-jwt, bcryptjs, class-validator, pg
-- **AI Service (Python)**: fastapi, uvicorn, psycopg2-binary, msal, openai, cryptography, pydub, requests
-- **Frontend**: next, react, @radix-ui/*, tailwindcss, class-variance-authority, react-hook-form, zod
-
-## Recent Changes
-- 2026-03-03: Completed thread-aware ingestion pipeline for Teams — all sync paths (manual via API and background scheduler) now use thread_engine → message_processor → vector_ops.add_threads()
-- 2026-03-03: All OpenAI clients use lazy initialization with Replit AI Integration credentials (AI_INTEGRATIONS_OPENAI_API_KEY + AI_INTEGRATIONS_OPENAI_BASE_URL) instead of bare OPENAI_API_KEY
-- 2026-03-03: Updated ai_ops.py context formatting to show thread metadata (participants, time range, message count, location)
-- 2026-03-03: Updated AI system prompt to describe thread-based context instead of individual messages
-- 2026-02-23: Restructured to two-level hierarchy: Connector (credentials) → Data Source (individual channels/chats with sync settings)
-- 2026-02-23: Built Connectors page with expandable cards, inline data source management (add channels/group chats)
-- 2026-02-23: Added credential merge on update — empty fields preserved from existing stored values
-- 2026-02-23: Old pages (data-sources, channels, group-chats) redirect to /dashboard/connectors
-- 2026-02-23: Updated AI service scheduler to iterate individual data_source rows for sync
-- 2026-03-02: Eliminated sync_metadata table — consolidated sync checkpoint into data_source.last_sync_at
-- 2026-03-02: Added manual "Sync Now" button per data source on Connectors page
-- 2026-03-02: Fixed sync scheduler to validate credentials before attempting sync (skips invalid connectors)
-- 2026-03-02: Fixed Knowledge Base sync history table to show correct fields, status badges, and error messages
-- 2026-03-02: Added meeting transcript ingestion — auto-detects VTT file attachments and Teams meeting recording events during sync
-- 2026-03-02: Created VTT parser (vtt_parser.py) with speaker extraction, timestamp parsing, and segment grouping for quality embeddings
-- 2026-03-02: Added transcript_processor.py to orchestrate VTT download + parsing + meeting transcript fetch from Graph API
-- 2026-03-02: Added Azure DevOps connector type with PAT and Azure AD authentication
-- 2026-03-02: Created azure_devops_client.py with work items, comments, iterations, and project listing
-- 2026-03-02: Added DevOps sync flow — fetches work items (all types) and comments, indexes as searchable content
-- 2026-03-02: Added DevOps dashboard page (/dashboard/devops) with stats, sprint progress, and work item breakdown
-- 2026-03-02: Updated AI prompt to cross-reference Teams conversations with Azure DevOps work items
-- 2026-03-02: Added devops_sync.py shared module for work item message conversion (used by both API and scheduler)
-- 2026-02-23: Renamed all tables to singular (tenant, user, project, connector, data_source, semantic_data, sync_history)
-- 2026-02-23: Added AES-256-GCM encryption for connector secrets with secrets_updated_at tracking
-- 2026-02-23: Replaced teams_messages with generic semantic_data table (source_type, segment_type, source_identifier JSONB)
-- 2026-02-23: Rebuilt management API with NestJS, TypeORM, repository pattern, SOLID principles
-- 2026-02-23: Added multi-tenancy with JWT auth, signup/login, tenant-scoped data isolation
-- 2026-02-23: Removed Streamlit dependency entirely; app.py is now a plain Python launcher for start.sh
-- 2026-02-23: Replaced Streamlit frontend with Next.js + shadcn/ui
-- 2026-02-22: Added multi-project support with pluggable data source architecture
-- 2026-02-22: Migrated vector store from ChromaDB to PostgreSQL + pgvector
+A multi-tenant knowledge base application integrating with Microsoft Teams and Azure DevOps. It extracts and indexes conversations, work items, and meeting transcripts into a PostgreSQL + pgvector database, offering AI-powered Q&A. The project emphasizes multi-tenancy, per-tenant data isolation, and configurable background data ingestion.
 
 ## User Preferences
 - Prefers NestJS with TypeORM and repository pattern for backend
@@ -153,3 +10,32 @@ No VTT files are processed. Azure DevOps data uses `add_messages()` → `semanti
 - Table names must be singular
 - All secrets must be stored encrypted with update timestamps
 - No frontend changes unless explicitly specified
+
+## System Architecture
+The application uses a microservices architecture:
+-   **Frontend**: Next.js 14 with shadcn/ui for a modern user interface.
+-   **Management API**: NestJS (TypeScript) with TypeORM handles authentication, project management, connectors, data sources, and synchronization. It enforces multi-tenancy and encrypts sensitive configurations.
+-   **AI Service**: FastAPI (Python) manages Teams and Azure DevOps API interactions, vector operations, and AI Q&A functionalities. It includes a thread-aware ingestion pipeline for Teams messages.
+-   **Proxy**: A Python-based reverse proxy routes traffic to the respective services.
+-   **Database**: PostgreSQL with pgvector for storing data and embeddings, supporting multi-tenancy with tenant-scoped data isolation.
+
+**Data Hierarchy**:
+-   **Connector**: Top-level configuration for external services (e.g., Microsoft Teams, Azure DevOps) storing encrypted credentials.
+-   **Data Source**: Represents individual syncable segments within a connector (e.g., a Teams channel, a DevOps project) with specific sync settings.
+-   **Semantic Data**: Generic indexed content from various sources, stored with embeddings for AI Q&A.
+
+**Technical Implementations**:
+-   **Authentication**: JWT strategy with Passport, bcrypt hashing, and `JwtAuthGuard`.
+-   **Validation**: DTOs with `class-validator` and a global `ValidationPipe`.
+-   **Secret Management**: AES-256-GCM encryption for sensitive configuration fields, with keys derived from `SESSION_SECRET`.
+-   **Teams Ingestion**: A 5-stage pipeline for Teams messages: audit, meeting/chat split, thread grouping, content collection/clarification (using `gpt-4o-mini`), and embedding/storage.
+-   **Azure DevOps Ingestion**: Fetches work items and comments, indexing them as searchable content.
+
+## External Dependencies
+-   **Database**: PostgreSQL with pgvector extension.
+-   **Embeddings**: fastembed (BAAI/bge-small-en-v1.5) for local embedding generation.
+-   **AI**: OpenAI via Replit AI Integrations for Q&A and content clarification.
+-   **Microsoft Graph API**: For interacting with Microsoft Teams (channels, chats, messages, meeting transcripts). Requires specific Azure AD permissions.
+-   **Azure DevOps REST API**: For interacting with Azure DevOps (work items, comments, iterations).
+-   **Python Libraries**: `fastapi`, `uvicorn`, `psycopg2-binary`, `msal`, `openai`, `cryptography`, `pydub`, `requests`.
+-   **Node.js Libraries**: `next`, `react`, `@radix-ui/*`, `tailwindcss`, `class-variance-authority`, `react-hook-form`, `zod`, `@nestjs/core`, `@nestjs/typeorm`, `typeorm`, `@nestjs/jwt`, `passport-jwt`, `bcryptjs`, `class-validator`, `pg`.

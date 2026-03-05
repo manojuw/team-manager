@@ -168,8 +168,107 @@ def _retro_match_work_items():
     logger.info(f"[RetroMatch] Complete: {matched}/{len(rows)} items linked")
 
 
-def _retro_generate_thread_plans():
+def _fix_json_newlines(raw: str) -> str:
+    result = []
+    in_string = False
+    escape_next = False
+    for char in raw:
+        if escape_next:
+            result.append(char)
+            escape_next = False
+        elif char == '\\':
+            result.append(char)
+            escape_next = True
+        elif char == '"':
+            result.append(char)
+            in_string = not in_string
+        elif in_string and char == '\n':
+            result.append('\\n')
+        elif in_string and char == '\r':
+            result.append('\\r')
+        elif in_string and char == '\t':
+            result.append('\\t')
+        else:
+            result.append(char)
+    return ''.join(result)
+
+
+def _generate_thread_plan(thread_id: str, clarified_content: str, openai_client) -> tuple:
     import json as _json
+
+    content_len = len(clarified_content)
+    content_snippet = clarified_content[:30000]
+    truncation_note = ""
+    if content_len > 30000:
+        truncation_note = f"\n\n[Note: conversation was {content_len} chars; only the first 30,000 shown above]"
+
+    if content_len < 2000:
+        summary_instruction = "2-3 sentences describing what this conversation is about and its main outcome."
+    elif content_len < 6000:
+        summary_instruction = "3-5 sentences covering the key topics discussed and the outcome."
+    elif content_len < 12000:
+        summary_instruction = (
+            "2-3 paragraphs: one for context/background, one covering the key discussion points "
+            "raised by each participant, and one summarizing decisions and outcome."
+        )
+    else:
+        summary_instruction = (
+            "3-5 detailed paragraphs — thorough and proportionate to the conversation length. "
+            "Cover: (1) context and purpose of the discussion, (2) all major topics raised by each "
+            "participant, (3) any bugs, issues, or features discussed, (4) decisions reached, "
+            "and (5) the overall outcome and next steps."
+        )
+
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You analyze translated Microsoft Teams conversation threads and produce a structured "
+                    "summary and task plan. Be thorough and accurate. Respond with JSON only."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Conversation:\n{content_snippet}{truncation_note}\n\n"
+                    "Produce JSON with two fields:\n"
+                    f"1. \"summary\": {summary_instruction}\n"
+                    "2. \"task_planning\": A Markdown-formatted plan with these sections "
+                    "(omit any section that has no content):\n"
+                    "   ## Action Items\n"
+                    "   List EVERY action item, task, bug fix, or follow-up mentioned in the conversation — "
+                    "do not consolidate or skip any. Each distinct item gets its own bullet. "
+                    "Include the responsible person if mentioned.\n"
+                    "   - [ ] **Person** — what needs to be done\n"
+                    "   ## Decisions Made\n"
+                    "   - decision\n"
+                    "   ## Open Questions\n"
+                    "   - question\n\n"
+                    "Return JSON only: {\"summary\": \"...\", \"task_planning\": \"...\"}"
+                ),
+            },
+        ],
+        temperature=0,
+        max_tokens=4000,
+    )
+    raw = response.choices[0].message.content.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    try:
+        data = _json.loads(raw)
+    except _json.JSONDecodeError:
+        data = _json.loads(_fix_json_newlines(raw))
+    summary = str(data.get("summary", ""))
+    task_planning = str(data.get("task_planning", ""))
+    logger.info(f"[ThreadPlan] Thread {thread_id}: summary={len(summary)} chars, plan={len(task_planning)} chars")
+    return summary, task_planning
+
+
+def _retro_generate_thread_plans():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor() as cur:
@@ -196,45 +295,7 @@ def _retro_generate_thread_plans():
 
     for thread_id, clarified_content in rows:
         try:
-            response = openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You analyze translated Teams conversation threads and produce a structured summary and task plan. "
-                            "Be concise and accurate. Respond with JSON only."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Conversation:\n{clarified_content[:3000]}\n\n"
-                            "Produce JSON with two fields:\n"
-                            "1. \"summary\": 2-3 sentences describing what this conversation is about and its main outcome.\n"
-                            "2. \"task_planning\": A Markdown-formatted plan with these sections (omit any section that has no content):\n"
-                            "   ## Action Items\n"
-                            "   - [ ] **Person** — what needs to be done\n"
-                            "   ## Decisions Made\n"
-                            "   - decision\n"
-                            "   ## Open Questions\n"
-                            "   - question\n\n"
-                            "Return JSON only: {\"summary\": \"...\", \"task_planning\": \"...\"}"
-                        ),
-                    },
-                ],
-                temperature=0,
-                max_tokens=1000,
-            )
-            raw = response.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            data = _json.loads(raw)
-            summary = str(data.get("summary", ""))
-            task_planning = str(data.get("task_planning", ""))
-
+            summary, task_planning = _generate_thread_plan(thread_id, clarified_content, openai_client)
             conn = psycopg2.connect(DATABASE_URL)
             with conn.cursor() as cur:
                 cur.execute(
@@ -931,6 +992,39 @@ def get_thread_data_sources(project_id: str, user=Depends(verify_token)):
         return {"data_sources": [{"id": str(r[0]), "name": r[1] or str(r[0])} for r in rows]}
     except Exception as e:
         logger.error(f"get_thread_data_sources failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/threads/{thread_id}/regenerate-plan")
+def regenerate_thread_plan(thread_id: str, user=Depends(verify_token)):
+    tenant_id = user["tenantId"]
+    try:
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT clarified_content FROM thread WHERE id = %s AND tenant_id = %s",
+                    (thread_id, tenant_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        clarified_content = row[0] or ""
+        if not clarified_content.strip():
+            raise HTTPException(status_code=400, detail="Thread has no content to summarize")
+        openai_client = _make_openai_client()
+        summary, task_planning = _generate_thread_plan(thread_id, clarified_content, openai_client)
+        with vector_ops._get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE thread SET summary = %s, task_planning = %s WHERE id = %s AND tenant_id = %s",
+                    (summary, task_planning, thread_id, tenant_id),
+                )
+        logger.info(f"[RegeneratePlan] Thread {thread_id} regenerated by tenant {tenant_id}")
+        return {"summary": summary, "task_planning": task_planning}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[RegeneratePlan] Error for thread {thread_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

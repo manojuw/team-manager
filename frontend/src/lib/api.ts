@@ -126,6 +126,8 @@ export const threads = {
     fetchWithAuth(`${AI_API}/threads/${threadId}/status`, { method: "PATCH", body: JSON.stringify(body) }),
   getDataSources: (projectId: string) =>
     fetchWithAuth(`${AI_API}/threads/data-sources?project_id=${projectId}`),
+  regeneratePlan: (threadId: string) =>
+    fetchWithAuth(`${AI_API}/threads/${threadId}/regenerate-plan`, { method: "POST" }),
 };
 
 export const ai = {

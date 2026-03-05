@@ -37,6 +37,7 @@ import {
   User,
   Tag,
   BarChart2,
+  RefreshCw,
 } from "lucide-react";
 
 interface Thread {
@@ -222,6 +223,7 @@ export default function ThreadsPage() {
   const [expandedWorkItem, setExpandedWorkItem] = useState<string | null>(null);
   const [devopsDetailCache, setDevopsDetailCache] = useState<Record<string, DevOpsDetail | null>>({});
   const [loadingDevopsDetail, setLoadingDevopsDetail] = useState<Record<string, boolean>>({});
+  const [regeneratingPlan, setRegeneratingPlan] = useState(false);
 
   const [filterDataSource, setFilterDataSource] = useState("all");
   const [filterSegmentType, setFilterSegmentType] = useState("all");
@@ -368,6 +370,22 @@ export default function ThreadsPage() {
       toast.error("Failed to download transcript");
     } finally {
       setDownloadingTranscript(false);
+    }
+  }
+
+  async function handleRegeneratePlan() {
+    if (!selectedThread) return;
+    setRegeneratingPlan(true);
+    try {
+      const data = await threadsApi.regeneratePlan(selectedThread.id);
+      const updated = { ...selectedThread, summary: data.summary, task_planning: data.task_planning };
+      setSelectedThread(updated);
+      setThreadList(prev => prev.map(t => t.id === selectedThread.id ? updated : t));
+      toast.success("Plan regenerated");
+    } catch {
+      toast.error("Failed to regenerate plan");
+    } finally {
+      setRegeneratingPlan(false);
     }
   }
 
@@ -617,6 +635,19 @@ export default function ThreadsPage() {
                           Transcript
                         </Button>
                       )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs gap-1"
+                        onClick={handleRegeneratePlan}
+                        disabled={regeneratingPlan}
+                        title="Regenerate summary and task plan using full conversation"
+                      >
+                        {regeneratingPlan
+                          ? <Loader2 className="h-3 w-3 animate-spin" />
+                          : <RefreshCw className="h-3 w-3" />}
+                        Regenerate
+                      </Button>
                       <Select
                         value={selectedThread.review_status || "pending"}
                         onValueChange={handleReviewStatus}
