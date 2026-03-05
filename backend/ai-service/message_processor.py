@@ -484,9 +484,22 @@ class MessageProcessor:
                     raw = raw[4:]
             import json as _json
             data = _json.loads(raw)
+            task_planning_raw = data.get("task_planning", "")
+            if isinstance(task_planning_raw, dict):
+                md_parts = []
+                for section, items in task_planning_raw.items():
+                    md_parts.append(section)
+                    if isinstance(items, list):
+                        for item in items:
+                            md_parts.append(str(item))
+                    else:
+                        md_parts.append(str(items))
+                task_planning_str = "\n".join(md_parts)
+            else:
+                task_planning_str = str(task_planning_raw)
             result = {
                 "summary": str(data.get("summary", "")),
-                "task_planning": str(data.get("task_planning", "")),
+                "task_planning": task_planning_str,
             }
             logger.info(f"[Processor] Generated thread plan: summary={len(result['summary'])} chars, plan={len(result['task_planning'])} chars")
             return result

@@ -266,7 +266,19 @@ def _generate_thread_plan(thread_id: str, clarified_content: str, openai_client)
     except _json.JSONDecodeError:
         data = _json.loads(_fix_json_newlines(raw))
     summary = str(data.get("summary", ""))
-    task_planning = str(data.get("task_planning", ""))
+    task_planning_raw = data.get("task_planning", "")
+    if isinstance(task_planning_raw, dict):
+        md_parts = []
+        for section, items in task_planning_raw.items():
+            md_parts.append(section)
+            if isinstance(items, list):
+                for item in items:
+                    md_parts.append(str(item))
+            else:
+                md_parts.append(str(items))
+        task_planning = "\n".join(md_parts)
+    else:
+        task_planning = str(task_planning_raw)
     logger.info(f"[ThreadPlan] Thread {thread_id}: summary={len(summary)} chars, plan={len(task_planning)} chars")
     return summary, task_planning
 
