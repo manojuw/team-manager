@@ -543,17 +543,109 @@ class VectorOps:
             c["devops_work_item_title"] = m_title.group(1).strip() if m_title else None
         return candidates[:n_results]
 
+    def _insert_work_item_row(self, cur, tenant_id, project_id, connector_id, data_source_id,
+                              thread_id, title, description, source_message_ids, embedding_str,
+                              semantic_data_id, devops_work_item_id, devops_work_item_title,
+                              item_type, assigned_to, parent_id) -> str:
+        cur.execute(
+            """INSERT INTO suggested_work_item
+               (tenant_id, project_id, connector_id, data_source_id,
+                thread_id, title, description, source_message_ids,
+                embedding, semantic_data_id, devops_work_item_id, devops_work_item_title,
+                item_type, assigned_to, parent_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s)
+               RETURNING id""",
+            (
+                tenant_id, project_id, connector_id, data_source_id,
+                thread_id, title, description,
+                source_message_ids if source_message_ids else [],
+                embedding_str,
+                semantic_data_id,
+                devops_work_item_id,
+                devops_work_item_title,
+                item_type,
+                assigned_to,
+                parent_id,
+            ),
+        )
+        row = cur.fetchone()
+        return str(row[0]) if row else None
+
+    def _resolve_devops_match(self, title, description, embedding_str, tenant_id, project_id, openai_client):
+        semantic_data_id = None
+        devops_work_item_id = None
+        devops_work_item_title = None
+        try:
+            if openai_client:
+                queries = _expand_queries_for_devops_match(openai_client, title, description)
+                candidates = self.search_devops_candidates(queries, tenant_id, project_id, n_results=5)
+                logger.info(f"[VectorOps] DevOps candidate pool: {len(candidates)} unique items across {len(queries)} queries")
+                for cand in candidates:
+                    if cand["sim"] >= 0.35:
+                        confirmed = _confirm_devops_match_with_gpt(
+                            openai_client, title, description, cand["content"]
+                        )
+                        if confirmed:
+                            semantic_data_id = cand["id"]
+                            devops_work_item_id = cand.get("devops_work_item_id")
+                            devops_work_item_title = cand.get("devops_work_item_title")
+                            logger.info(
+                                f"[VectorOps] → GPT confirmed DevOps match: {semantic_data_id} "
+                                f"(work_item_id={devops_work_item_id}, sim={cand['sim']:.3f})"
+                            )
+                            break
+                        else:
+                            logger.info(f"[VectorOps] → GPT rejected candidate (sim={cand['sim']:.3f})")
+                if not semantic_data_id:
+                    logger.info("[VectorOps] → No confirmed DevOps match found")
+            else:
+                with self._get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT id, content, 1 - (embedding <=> %s::vector) AS similarity
+                               FROM semantic_data
+                               WHERE tenant_id = %s AND project_id = %s
+                                 AND source_type = 'azure_devops'
+                                 AND embedding IS NOT NULL
+                               ORDER BY embedding <=> %s::vector
+                               LIMIT 1""",
+                            (embedding_str, tenant_id, project_id, embedding_str),
+                        )
+                        row = cur.fetchone()
+                        if row:
+                            sim = float(row[2]) if row[2] else 0.0
+                            if sim >= 0.82:
+                                semantic_data_id = str(row[0])
+                                first_line = (row[1] or "").split("\n")[0]
+                                m_id = re.search(r'\[Work Item #(\d+)\]', first_line)
+                                devops_work_item_id = m_id.group(1) if m_id else None
+                                m_title = re.search(r'\[Work Item #\d+\] (.+)', first_line)
+                                devops_work_item_title = m_title.group(1).strip() if m_title else None
+                                logger.info(f"[VectorOps] → Fallback match: {semantic_data_id} (sim={sim:.3f})")
+                            else:
+                                logger.info(f"[VectorOps] → No fallback match (best sim={sim:.3f})")
+        except Exception as e:
+            logger.warning(f"[VectorOps] DevOps match lookup failed: {e}")
+        return semantic_data_id, devops_work_item_id, devops_work_item_title
+
     def store_work_items(self, work_items: list, thread_id: str,
                          tenant_id: str, project_id: str,
                          connector_id: str = None, data_source_id: str = None,
                          openai_client=None) -> int:
         if not work_items:
             return 0
+
         stored = 0
+        parent_uuid = None
+
         for item in work_items:
             title = item.get("title", "")
             description = item.get("description", "")
             source_message_ids = item.get("source_message_ids", [])
+            item_type = item.get("item_type", "Task")
+            assigned_to = item.get("assigned_to")
+            is_parent = item.get("is_parent", False)
+
             if not title:
                 continue
             try:
@@ -564,78 +656,23 @@ class VectorOps:
                 semantic_data_id = None
                 devops_work_item_id = None
                 devops_work_item_title = None
-                logger.info(f"[VectorOps] Checking for existing DevOps match for work item: '{title}'")
-                try:
-                    if openai_client:
-                        queries = _expand_queries_for_devops_match(openai_client, title, description)
-                        candidates = self.search_devops_candidates(queries, tenant_id, project_id, n_results=5)
-                        logger.info(f"[VectorOps] DevOps candidate pool: {len(candidates)} unique items across {len(queries)} queries")
-                        for cand in candidates:
-                            if cand["sim"] >= 0.35:
-                                confirmed = _confirm_devops_match_with_gpt(
-                                    openai_client, title, description, cand["content"]
-                                )
-                                if confirmed:
-                                    semantic_data_id = cand["id"]
-                                    devops_work_item_id = cand.get("devops_work_item_id")
-                                    devops_work_item_title = cand.get("devops_work_item_title")
-                                    logger.info(
-                                        f"[VectorOps] → GPT confirmed DevOps match: {semantic_data_id} "
-                                        f"(work_item_id={devops_work_item_id}, sim={cand['sim']:.3f})"
-                                    )
-                                    break
-                                else:
-                                    logger.info(
-                                        f"[VectorOps] → GPT rejected candidate (sim={cand['sim']:.3f})"
-                                    )
-                        if not semantic_data_id:
-                            logger.info("[VectorOps] → No confirmed DevOps match found")
-                    else:
-                        with self._get_conn() as conn:
-                            with conn.cursor() as cur:
-                                cur.execute(
-                                    """SELECT id, content, 1 - (embedding <=> %s::vector) AS similarity
-                                       FROM semantic_data
-                                       WHERE tenant_id = %s AND project_id = %s
-                                         AND source_type = 'azure_devops'
-                                         AND embedding IS NOT NULL
-                                       ORDER BY embedding <=> %s::vector
-                                       LIMIT 1""",
-                                    (embedding_str, tenant_id, project_id, embedding_str),
-                                )
-                                row = cur.fetchone()
-                                if row:
-                                    sim = float(row[2]) if row[2] else 0.0
-                                    if sim >= 0.82:
-                                        semantic_data_id = str(row[0])
-                                        first_line = (row[1] or "").split("\n")[0]
-                                        m_id = re.search(r'\[Work Item #(\d+)\]', first_line)
-                                        devops_work_item_id = m_id.group(1) if m_id else None
-                                        m_title = re.search(r'\[Work Item #\d+\] (.+)', first_line)
-                                        devops_work_item_title = m_title.group(1).strip() if m_title else None
-                                        logger.info(f"[VectorOps] → Fallback match: {semantic_data_id} (sim={sim:.3f})")
-                                    else:
-                                        logger.info(f"[VectorOps] → No fallback match (best sim={sim:.3f})")
-                except Exception as e:
-                    logger.warning(f"[VectorOps] DevOps match lookup failed: {e}")
+
+                if item_type != "UserStory":
+                    logger.info(f"[VectorOps] Checking DevOps match for: '{title}'")
+                    semantic_data_id, devops_work_item_id, devops_work_item_title = (
+                        self._resolve_devops_match(title, description, embedding_str, tenant_id, project_id, openai_client)
+                    )
+
+                parent_id = None if is_parent else parent_uuid
 
                 with self._get_conn() as conn:
                     with conn.cursor() as cur:
-                        cur.execute(
-                            """INSERT INTO suggested_work_item
-                               (tenant_id, project_id, connector_id, data_source_id,
-                                thread_id, title, description, source_message_ids,
-                                embedding, semantic_data_id, devops_work_item_id, devops_work_item_title)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s)""",
-                            (
-                                tenant_id, project_id, connector_id, data_source_id,
-                                thread_id, title, description,
-                                source_message_ids if source_message_ids else [],
-                                embedding_str,
-                                semantic_data_id,
-                                devops_work_item_id,
-                                devops_work_item_title,
-                            ),
+                        new_id = self._insert_work_item_row(
+                            cur,
+                            tenant_id, project_id, connector_id, data_source_id,
+                            thread_id, title, description, source_message_ids, embedding_str,
+                            semantic_data_id, devops_work_item_id, devops_work_item_title,
+                            item_type, assigned_to, parent_id,
                         )
                         if source_message_ids:
                             cur.execute(
@@ -646,9 +683,15 @@ class VectorOps:
                                 (source_message_ids, connector_id, data_source_id),
                             )
                     conn.commit()
+
+                if is_parent and new_id:
+                    parent_uuid = new_id
+                    logger.info(f"[VectorOps] Stored UserStory parent with id={parent_uuid}")
+
                 stored += 1
             except Exception as e:
                 logger.error(f"[VectorOps] Failed to store work item '{title}': {e}")
+
         logger.info(f"[VectorOps] Stored {stored} suggested work item(s) for thread {thread_id}")
         return stored
 

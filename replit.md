@@ -30,6 +30,7 @@ The application uses a microservices architecture:
 -   **Secret Management**: AES-256-GCM encryption for sensitive configuration fields, with keys derived from `SESSION_SECRET`.
 -   **Teams Ingestion**: A 5-stage pipeline for Teams messages: audit, meeting/chat split, thread grouping, content collection/clarification (using `gpt-4o-mini`), and embedding/storage.
 -   **Azure DevOps Ingestion**: Fetches work items and comments, indexing them as searchable content.
+-   **Work Item Hierarchy**: AI extracts `item_type` (Bug/Task/Issue) and `assigned_to` per item. When a thread yields 2+ items, code auto-creates a parent `UserStory` and stores all items as children via `parent_id`. Frontend renders UserStory cards with violet left border and children indented below.
 
 ## External Dependencies
 -   **Database**: PostgreSQL with pgvector extension.

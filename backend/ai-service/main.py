@@ -100,6 +100,9 @@ def _run_migrations():
             cur.execute("ALTER TABLE thread ADD COLUMN IF NOT EXISTS viewed BOOLEAN DEFAULT FALSE")
             cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS devops_work_item_id TEXT")
             cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS devops_work_item_title TEXT")
+            cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS item_type VARCHAR(50) DEFAULT 'Task'")
+            cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS assigned_to TEXT")
+            cur.execute("ALTER TABLE suggested_work_item ADD COLUMN IF NOT EXISTS parent_id UUID REFERENCES suggested_work_item(id) ON DELETE SET NULL")
         conn.commit()
         conn.close()
         logger.info("[Migration] Migrations applied successfully")
@@ -1036,7 +1039,8 @@ def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
             with conn.cursor() as cur:
                 cur.execute(
                     """SELECT id, title, description, status, semantic_data_id, created_at,
-                              devops_work_item_id, devops_work_item_title
+                              devops_work_item_id, devops_work_item_title,
+                              item_type, assigned_to, parent_id
                        FROM suggested_work_item
                        WHERE thread_id = %s AND tenant_id = %s
                        ORDER BY created_at""",
@@ -1050,11 +1054,14 @@ def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
                 "title": row[1],
                 "description": row[2] or "",
                 "status": row[3] or "pending",
-                "semantic_data_id": row[4],
+                "semantic_data_id": str(row[4]) if row[4] else None,
                 "linked_to_devops": bool(row[4]),
                 "devops_work_item_id": row[6],
                 "devops_work_item_title": row[7],
                 "created_at": row[5].isoformat() if row[5] else None,
+                "item_type": row[8] or "Task",
+                "assigned_to": row[9],
+                "parent_id": str(row[10]) if row[10] else None,
             })
         return {"work_items": result}
     except Exception as e:
