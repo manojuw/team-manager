@@ -22,7 +22,7 @@ cd /home/runner/workspace
 echo "[START] Building and starting Next.js frontend on port 5001..."
 cd /home/runner/workspace/frontend
 export NEXT_PUBLIC_SITE_URL=https://b31b57a1-419f-4167-a41c-da7c93c04281-00-1fzcly9rvrykj.janeway.replit.dev
-if [ ! -d ".next" ] || [ "$(find src -newer .next/BUILD_ID -print -quit 2>/dev/null)" ]; then
+if [ ! -f ".next/BUILD_ID" ] || [ "$(find src -newer .next/BUILD_ID -print -quit 2>/dev/null)" ]; then
   echo "[START] Building Next.js..."
   npx next build
 fi

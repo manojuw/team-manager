@@ -920,7 +920,7 @@ def get_thread_data_sources(project_id: str, user=Depends(verify_token)):
                 cur.execute(
                     """SELECT DISTINCT t.data_source_id, ds.name
                        FROM thread t
-                       LEFT JOIN data_source ds ON ds.id = t.data_source_id
+                       LEFT JOIN data_source ds ON ds.id = t.data_source_id::uuid
                        WHERE t.tenant_id = %s AND t.project_id = %s
                          AND t.data_source_id IS NOT NULL""",
                     (tenant_id, project_id),

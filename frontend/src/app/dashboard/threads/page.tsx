@@ -572,9 +572,11 @@ export default function ThreadsPage() {
                           <SelectItem value="action_taken">Action Taken</SelectItem>
                         </SelectContent>
                       </Select>
-                      {selectedThread.viewed
-                        ? <Eye className="h-4 w-4 text-muted-foreground" title="Viewed" />
-                        : <EyeOff className="h-4 w-4 text-muted-foreground" title="Not viewed" />}
+                      <span title={selectedThread.viewed ? "Viewed" : "Not viewed"}>
+                        {selectedThread.viewed
+                          ? <Eye className="h-4 w-4 text-muted-foreground" />
+                          : <EyeOff className="h-4 w-4 text-muted-foreground" />}
+                      </span>
                     </div>
                   </div>
 
