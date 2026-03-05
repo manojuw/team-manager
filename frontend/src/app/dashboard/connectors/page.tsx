@@ -122,6 +122,7 @@ interface GroupChat {
   id: string;
   topic?: string;
   members?: Array<{ displayName?: string; userId?: string }>;
+  chat_type?: string;
 }
 
 interface DevOpsProject {
@@ -1074,8 +1075,17 @@ function AddGroupChatSources({
                 <label key={chat.id} className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent/50 cursor-pointer">
                   <Checkbox checked={selectedChatIds.has(chat.id)} onCheckedChange={() => toggleChat(chat.id)} />
                   <MessageSquare className="size-3 text-muted-foreground shrink-0" />
-                  <div className="min-w-0">
-                    <span className="text-sm block truncate">{getChatName(chat)}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm block truncate">{getChatName(chat)}</span>
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium border shrink-0 ${
+                        chat.chat_type === "meeting"
+                          ? "bg-blue-100 text-blue-700 border-blue-200"
+                          : "bg-gray-100 text-gray-600 border-gray-200"
+                      }`}>
+                        {chat.chat_type === "meeting" ? "Meeting" : "Group"}
+                      </span>
+                    </div>
                     {chat.members && (
                       <span className="text-xs text-muted-foreground block truncate">
                         {chat.members.length} member(s)

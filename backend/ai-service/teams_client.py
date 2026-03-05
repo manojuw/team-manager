@@ -264,23 +264,24 @@ class TeamsClient:
 
     def get_group_chats(self, user_ids: list = None) -> list:
         all_chats = {}
-        for user_id in (user_ids or []):
-            url = f"{GRAPH_API_BASE}/users/{user_id}/chats"
-            params = {
-                "$filter": "chatType eq 'group'",
-                "$select": "id,topic,chatType,createdDateTime,lastUpdatedDateTime",
-                "$top": 50,
-            }
-            try:
-                chats = self._get_all_pages(url, params=params, max_pages=5)
-            except Exception as e:
-                logger.warning(f"Failed to fetch chats for user {user_id}: {e}")
-                continue
+        for chat_type_filter in ("group", "meeting"):
+            for user_id in (user_ids or []):
+                url = f"{GRAPH_API_BASE}/users/{user_id}/chats"
+                params = {
+                    "$filter": f"chatType eq '{chat_type_filter}'",
+                    "$select": "id,topic,chatType,createdDateTime,lastUpdatedDateTime",
+                    "$top": 50,
+                }
+                try:
+                    chats = self._get_all_pages(url, params=params, max_pages=5)
+                except Exception as e:
+                    logger.warning(f"Failed to fetch {chat_type_filter} chats for user {user_id}: {e}")
+                    continue
 
-            for chat in chats:
-                chat_id = chat.get("id", "")
-                if chat_id and chat_id not in all_chats:
-                    all_chats[chat_id] = chat
+                for chat in chats:
+                    chat_id = chat.get("id", "")
+                    if chat_id and chat_id not in all_chats:
+                        all_chats[chat_id] = chat
 
         results = []
         for chat_id, chat in all_chats.items():
@@ -306,6 +307,7 @@ class TeamsClient:
                 "topic": topic or display_name or "Unnamed Chat",
                 "members": [{"displayName": n} for n in member_names],
                 "last_updated": chat.get("lastUpdatedDateTime", ""),
+                "chat_type": chat.get("chatType", "group"),
             })
         return results
 
