@@ -150,6 +150,7 @@ class MessageProcessor:
                 if transcript:
                     parts.append(f"Meeting Recording Transcript:\n{transcript}")
                     msg["has_video"] = True
+                    thread["has_video"] = True
                     recording_transcribed = True
 
         for msg in messages:
@@ -181,6 +182,7 @@ class MessageProcessor:
                     if transcript:
                         parts.append(f"Meeting Recording Transcript:\n{transcript}")
                         msg["has_video"] = True
+                        thread["has_video"] = True
                         recording_transcribed = True
                         break
                 if recording_transcribed:
@@ -277,6 +279,7 @@ class MessageProcessor:
                             if transcript:
                                 parts.append(f"Meeting Audio Transcript:\n{transcript}")
                                 msg["has_audio"] = True
+                                thread["has_audio"] = True
                         except Exception as e:
                             logger.warning(f"[Processor] Meeting audio transcription failed: {e}")
                     elif self.audio_processor.is_video_attachment(att):
@@ -290,6 +293,7 @@ class MessageProcessor:
                             if transcript:
                                 parts.append(f"Meeting Video Transcript:\n{transcript}")
                                 msg["has_video"] = True
+                                thread["has_video"] = True
                         except Exception as e:
                             logger.warning(f"[Processor] Meeting video transcription failed: {e}")
 
