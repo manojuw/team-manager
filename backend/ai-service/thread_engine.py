@@ -1,9 +1,12 @@
+import json as _json
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+RECORDING_CARD_WINDOW = timedelta(minutes=60)
 
 
 def _parse_dt(s: str) -> Optional[datetime]:
@@ -13,6 +16,137 @@ def _parse_dt(s: str) -> Optional[datetime]:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+
+
+def _extract_card_urls_te(node) -> list:
+    urls = []
+    if not node:
+        return urls
+    if isinstance(node, str):
+        return urls
+    if isinstance(node, list):
+        for item in node:
+            urls.extend(_extract_card_urls_te(item))
+        return urls
+    if not isinstance(node, dict):
+        return urls
+    url = node.get("url", "")
+    if url:
+        urls.append(url)
+    for key in ("actions", "body", "items", "columns", "facts", "rows", "cells"):
+        urls.extend(_extract_card_urls_te(node.get(key)))
+    return urls
+
+
+def _is_recording_url_te(url: str) -> bool:
+    url_lower = url.lower()
+    recording_patterns = (
+        "sharepoint.com", "sharepoint.us",
+        "1drv.ms", "onedrive.live.com",
+        "microsoftstream.com", "web.microsoftstream.com",
+    )
+    if any(p in url_lower for p in recording_patterns):
+        return True
+    if any(url_lower.endswith(ext) for ext in (".mp4", ".m4v", ".webm", ".mov")):
+        return True
+    return False
+
+
+def _is_recording_card_message(msg: dict) -> bool:
+    for att in msg.get("attachments", []):
+        content_url = att.get("content_url") or ""
+        if content_url and _is_recording_url_te(content_url):
+            return True
+        card_raw = att.get("card_content") or ""
+        if card_raw:
+            try:
+                card = _json.loads(card_raw)
+                for url in _extract_card_urls_te(card):
+                    if url and _is_recording_url_te(url):
+                        return True
+            except Exception:
+                pass
+    return False
+
+
+def build_meeting_threads(messages: list) -> tuple:
+    sorted_msgs = sorted(
+        messages,
+        key=lambda m: _parse_dt(m.get("created_at", "")) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+
+    event_msgs = []
+    card_msgs = []
+    remaining_ids = set()
+
+    for msg in sorted_msgs:
+        if msg.get("message_type") == "meeting_event":
+            event_msgs.append(msg)
+        elif _is_recording_card_message(msg):
+            card_msgs.append(msg)
+        else:
+            remaining_ids.add(id(msg))
+
+    recording_card_ids_used = set()
+    meeting_threads = []
+
+    for event_msg in event_msgs:
+        event_time = _parse_dt(event_msg.get("created_at", ""))
+        associated_cards = []
+
+        for card_msg in card_msgs:
+            if id(card_msg) in recording_card_ids_used:
+                continue
+            card_time = _parse_dt(card_msg.get("created_at", ""))
+            if event_time and card_time:
+                diff = card_time - event_time
+                if timedelta(0) <= diff <= RECORDING_CARD_WINDOW:
+                    associated_cards.append((diff, card_msg))
+
+        associated_cards.sort(key=lambda x: x[0])
+
+        thread_msgs = [event_msg]
+        for diff, card_msg in associated_cards:
+            thread_msgs.append(card_msg)
+            recording_card_ids_used.add(id(card_msg))
+            minutes = diff.total_seconds() / 60
+            logger.info(f"[Thread] Recording card matched to meeting event (time diff={minutes:.1f} minutes)")
+
+        sender = event_msg.get("sender", "Unknown")
+        event_time_parsed = _parse_dt(event_msg.get("created_at", ""))
+        last_time = event_time_parsed
+        if thread_msgs:
+            times = [_parse_dt(m.get("created_at", "")) for m in thread_msgs]
+            last_time = max((t for t in times if t), default=event_time_parsed)
+
+        logger.info(f"[Thread] Meeting event has {len(associated_cards)} recording card(s) attached")
+
+        meeting_threads.append({
+            "id": str(uuid.uuid4()),
+            "messages": thread_msgs,
+            "participants": {sender},
+            "started_at": event_time_parsed,
+            "last_message_at": last_time,
+            "has_audio": False,
+            "has_video": False,
+            "is_meeting": True,
+        })
+
+    remaining_chat = [
+        m for m in sorted_msgs
+        if id(m) in remaining_ids or (
+            _is_recording_card_message(m) and id(m) not in recording_card_ids_used
+        )
+    ]
+
+    logger.info(
+        f"[Thread] build_meeting_threads: {len(event_msgs)} meeting event(s), "
+        f"{len(card_msgs)} recording card(s), "
+        f"{len(recording_card_ids_used)} card(s) matched, "
+        f"{len(remaining_chat)} chat message(s) remaining"
+    )
+
+    return meeting_threads, remaining_chat
 
 
 def _thread_summary(thread: dict, max_chars: int = 300) -> str:

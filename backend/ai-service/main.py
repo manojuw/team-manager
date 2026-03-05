@@ -23,7 +23,7 @@ from scheduler import SyncScheduler
 from encryption import decrypt_config
 from azure_devops_client import AzureDevOpsClient, DevOpsApiError
 from devops_sync import fetch_devops_work_items_as_messages
-from thread_engine import ThreadEngine, _parse_dt
+from thread_engine import ThreadEngine, _parse_dt, build_meeting_threads
 from message_processor import MessageProcessor
 from audio_processor import AudioProcessor
 from work_item_extractor import WorkItemExtractor
@@ -545,17 +545,7 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
 
-    meeting_messages = [m for m in messages if m.get("message_type") == "meeting_event"]
-    chat_messages = [m for m in messages if m.get("message_type") != "meeting_event"]
-
-    meeting_threads = [{
-        "id": str(_uuid.uuid4()),
-        "messages": [m],
-        "participants": {m.get("sender", "Unknown")},
-        "started_at": _parse_dt(m.get("created_at", "")),
-        "last_message_at": _parse_dt(m.get("created_at", "")),
-        "has_audio": False, "has_video": False, "is_meeting": True,
-    } for m in meeting_messages]
+    meeting_threads, chat_messages = build_meeting_threads(messages)
 
     openai_client = _make_openai_client()
     thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
@@ -639,17 +629,7 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
         req.project_id, tenant_id, req.connector_id, req.data_source_id
     )
 
-    meeting_messages = [m for m in messages if m.get("message_type") == "meeting_event"]
-    chat_messages = [m for m in messages if m.get("message_type") != "meeting_event"]
-
-    meeting_threads = [{
-        "id": str(_uuid.uuid4()),
-        "messages": [m],
-        "participants": {m.get("sender", "Unknown")},
-        "started_at": _parse_dt(m.get("created_at", "")),
-        "last_message_at": _parse_dt(m.get("created_at", "")),
-        "has_audio": False, "has_video": False, "is_meeting": True,
-    } for m in meeting_messages]
+    meeting_threads, chat_messages = build_meeting_threads(messages)
 
     openai_client = _make_openai_client()
     thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
