@@ -1,12 +1,15 @@
 import base64
+import json as _json
 import logging
 import re
 import msal
 import requests
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 logger = logging.getLogger(__name__)
+
+RECORDING_CARD_WINDOW = timedelta(hours=2)
 
 
 GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
@@ -42,6 +45,121 @@ def _extract_attachments(msg: dict) -> list:
         }
         result.append(info)
     return result
+
+
+_RECORDING_URL_PATTERNS = (
+    "sharepoint.com", "sharepoint.us",
+    "1drv.ms", "onedrive.live.com",
+    "microsoftstream.com", "web.microsoftstream.com",
+)
+_RECORDING_EXTENSIONS = (".mp4", ".m4v", ".webm", ".mov")
+
+
+def _url_is_recording(url: str) -> bool:
+    url_lower = url.lower()
+    if any(p in url_lower for p in _RECORDING_URL_PATTERNS):
+        return True
+    if any(url_lower.endswith(ext) for ext in _RECORDING_EXTENSIONS):
+        return True
+    return False
+
+
+def _walk_card_urls(node) -> list:
+    urls = []
+    if not node:
+        return urls
+    if isinstance(node, list):
+        for item in node:
+            urls.extend(_walk_card_urls(item))
+        return urls
+    if not isinstance(node, dict):
+        return urls
+    url = node.get("url", "")
+    if url:
+        urls.append(url)
+    for key in ("actions", "body", "items", "columns", "facts", "rows", "cells"):
+        urls.extend(_walk_card_urls(node.get(key)))
+    return urls
+
+
+def _is_recording_card_raw(msg: dict) -> bool:
+    for att in msg.get("attachments", []):
+        content_url = att.get("contentUrl") or ""
+        if content_url and _url_is_recording(content_url):
+            return True
+        card_raw = att.get("content") or ""
+        if card_raw:
+            try:
+                card = _json.loads(card_raw)
+                for url in _walk_card_urls(card):
+                    if url and _url_is_recording(url):
+                        return True
+            except Exception:
+                pass
+    return False
+
+
+def _rescue_recording_cards(all_api_msgs: list, results: list, source_base_url: str) -> list:
+    seen_ids = {r.get("id", "") for r in results}
+    meeting_times = []
+    for r in results:
+        if r.get("message_type") == "meeting_event" and r.get("created_at"):
+            try:
+                t = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                meeting_times.append(t)
+            except (ValueError, TypeError):
+                pass
+
+    if not meeting_times:
+        return results
+
+    rescued = []
+    for msg in all_api_msgs:
+        msg_id = msg.get("id", "")
+        if not msg_id or msg_id in seen_ids:
+            continue
+        if msg.get("eventDetail"):
+            continue
+        if not _is_recording_card_raw(msg):
+            continue
+        created = msg.get("createdDateTime", "")
+        if not created:
+            continue
+        try:
+            msg_time = datetime.fromisoformat(created.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            continue
+
+        for evt_time in meeting_times:
+            diff = msg_time - evt_time
+            if -RECORDING_CARD_WINDOW <= diff <= RECORDING_CARD_WINDOW:
+                attachment_info = _extract_attachments(msg)
+                body = msg.get("body", {})
+                content = body.get("content", "")
+                if body.get("contentType", "text") == "html":
+                    content = _extract_html_text(content)
+                name_list = ", ".join(a["name"] for a in attachment_info if a.get("name"))
+                rescued.append({
+                    "id": msg_id,
+                    "content": content.strip() if content.strip() else f"[Recording: {name_list}]",
+                    "sender": _extract_sender(msg),
+                    "created_at": created,
+                    "attachments": attachment_info,
+                    "message_type": msg.get("messageType", "message"),
+                    "source_base_url": source_base_url,
+                })
+                seen_ids.add(msg_id)
+                minutes = diff.total_seconds() / 60
+                logger.info(
+                    f"[TeamsClient] Rescued recording card {msg_id} "
+                    f"(posted {minutes:+.1f} min relative to meeting event)"
+                )
+                break
+
+    if rescued:
+        logger.info(f"[TeamsClient] Rescued {len(rescued)} recording card message(s) skipped by since-filter")
+
+    return results + rescued
 
 
 class TeamsClient:
@@ -210,6 +328,11 @@ class TeamsClient:
             f"({len(messages)} top-level, {total_replies_fetched} replies fetched)"
         )
 
+        if since:
+            results = _rescue_recording_cards(
+                messages, results, f"teams/{team_id}/channels/{channel_id}"
+            )
+
         return results
 
     def _get_message_replies(self, team_id: str, channel_id: str, message_id: str) -> list:
@@ -373,6 +496,9 @@ class TeamsClient:
                     "message_type": msg.get("messageType", "message"),
                     "source_base_url": f"chats/{chat_id}",
                 })
+
+        if since:
+            results = _rescue_recording_cards(messages, results, f"chats/{chat_id}")
 
         return results
 
