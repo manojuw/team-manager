@@ -88,7 +88,10 @@ class MessageProcessor:
             return None
         try:
             logger.info(f"[Processor] Trying recording download: {label} ({url[:80]})")
-            video_bytes = self.teams_client.get_recording_from_sharing_url(url)
+            if url.startswith("https://graph.microsoft.com"):
+                video_bytes = self.teams_client._get_raw(url)
+            else:
+                video_bytes = self.teams_client.get_recording_from_sharing_url(url)
             if not video_bytes:
                 logger.warning(f"[Processor] No bytes from recording URL: {label}")
                 return None
@@ -122,6 +125,33 @@ class MessageProcessor:
             logger.info(f"[Processor]   msg[{i}] type={msg_type} event={event_type or 'N/A'} attachments=[{att_summary}]")
 
         recording_transcribed = False
+
+        for status_priority in ("success", "chunkFinished"):
+            if recording_transcribed:
+                break
+            for msg in messages:
+                if recording_transcribed:
+                    break
+                event_detail = msg.get("event_detail") or {}
+                odata_type = event_detail.get("@odata.type", "")
+                if "callRecording" not in odata_type:
+                    continue
+                if event_detail.get("callRecordingStatus") != status_priority:
+                    continue
+                rec_url = event_detail.get("callRecordingUrl") or ""
+                if not rec_url:
+                    continue
+                display_name = event_detail.get("callRecordingDisplayName") or "Recording"
+                logger.info(
+                    f"[Processor] Found callRecordingUrl in event detail: {display_name} "
+                    f"(status={status_priority})"
+                )
+                transcript = self._try_download_and_transcribe_recording(rec_url, display_name)
+                if transcript:
+                    parts.append(f"Meeting Recording Transcript:\n{transcript}")
+                    msg["has_video"] = True
+                    recording_transcribed = True
+
         for msg in messages:
             atts = msg.get("attachments", [])
             if not atts or recording_transcribed:
