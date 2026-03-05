@@ -87,46 +87,69 @@ def build_meeting_threads(messages: list) -> tuple:
         else:
             remaining_ids.add(id(msg))
 
+    calls = {}
+    no_call_id_events = []
+    for event_msg in event_msgs:
+        event_detail = event_msg.get("event_detail") or {}
+        call_id = event_detail.get("callId") or ""
+        if call_id:
+            calls.setdefault(call_id, []).append(event_msg)
+        else:
+            no_call_id_events.append(event_msg)
+
+    call_groups = list(calls.values()) + [[e] for e in no_call_id_events]
+
     recording_card_ids_used = set()
     meeting_threads = []
 
-    for event_msg in event_msgs:
-        event_time = _parse_dt(event_msg.get("created_at", ""))
-        associated_cards = []
+    for call_events in call_groups:
+        call_events_sorted = sorted(
+            call_events,
+            key=lambda m: _parse_dt(m.get("created_at", "")) or datetime.min.replace(tzinfo=timezone.utc)
+        )
 
+        earliest_time = _parse_dt(call_events_sorted[0].get("created_at", ""))
+        latest_time = earliest_time
+
+        participants = []
+        for ev in call_events_sorted:
+            sender = ev.get("sender", "Unknown")
+            if sender not in participants:
+                participants.append(sender)
+            t = _parse_dt(ev.get("created_at", ""))
+            if t and (latest_time is None or t > latest_time):
+                latest_time = t
+
+        associated_cards = []
         for card_msg in card_msgs:
             if id(card_msg) in recording_card_ids_used:
                 continue
             card_time = _parse_dt(card_msg.get("created_at", ""))
-            if event_time and card_time:
-                diff = card_time - event_time
-                if timedelta(0) <= diff <= RECORDING_CARD_WINDOW:
-                    associated_cards.append((diff, card_msg))
+            if earliest_time and card_time:
+                diff_from_start = card_time - earliest_time
+                if timedelta(0) <= diff_from_start <= RECORDING_CARD_WINDOW:
+                    associated_cards.append((diff_from_start, card_msg))
 
         associated_cards.sort(key=lambda x: x[0])
 
-        thread_msgs = [event_msg]
+        thread_msgs = list(call_events_sorted)
         for diff, card_msg in associated_cards:
             thread_msgs.append(card_msg)
             recording_card_ids_used.add(id(card_msg))
             minutes = diff.total_seconds() / 60
-            logger.info(f"[Thread] Recording card matched to meeting event (time diff={minutes:.1f} minutes)")
+            logger.info(f"[Thread] Recording card matched to call (time diff={minutes:.1f} minutes)")
 
-        sender = event_msg.get("sender", "Unknown")
-        event_time_parsed = _parse_dt(event_msg.get("created_at", ""))
-        last_time = event_time_parsed
-        if thread_msgs:
-            times = [_parse_dt(m.get("created_at", "")) for m in thread_msgs]
-            last_time = max((t for t in times if t), default=event_time_parsed)
-
-        logger.info(f"[Thread] Meeting event has {len(associated_cards)} recording card(s) attached")
+        logger.info(
+            f"[Thread] Call group: {len(call_events_sorted)} event(s), "
+            f"{len(associated_cards)} recording card(s) attached"
+        )
 
         meeting_threads.append({
             "id": str(uuid.uuid4()),
             "messages": thread_msgs,
-            "participants": {sender},
-            "started_at": event_time_parsed,
-            "last_message_at": last_time,
+            "participants": participants,
+            "started_at": earliest_time,
+            "last_message_at": latest_time,
             "has_audio": False,
             "has_video": False,
             "is_meeting": True,
@@ -140,7 +163,8 @@ def build_meeting_threads(messages: list) -> tuple:
     ]
 
     logger.info(
-        f"[Thread] build_meeting_threads: {len(event_msgs)} meeting event(s), "
+        f"[Thread] build_meeting_threads: {len(event_msgs)} event(s) → "
+        f"{len(call_groups)} unique call(s) → {len(meeting_threads)} meeting thread(s), "
         f"{len(card_msgs)} recording card(s), "
         f"{len(recording_card_ids_used)} card(s) matched, "
         f"{len(remaining_chat)} chat message(s) remaining"

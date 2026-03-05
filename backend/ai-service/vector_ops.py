@@ -147,7 +147,7 @@ class VectorOps:
                 continue
 
             raw_messages = thread.get("messages", [])
-            participants = thread.get("participants", [])
+            participants = list(thread.get("participants") or [])
             started_at = thread.get("started_at")
             last_message_at = thread.get("last_message_at")
             started_by = raw_messages[0].get("sender", "") if raw_messages else ""
@@ -200,10 +200,13 @@ class VectorOps:
                                 summary, task_planning,
                             ),
                         )
-                        added += 1
+                        if cur.rowcount > 0:
+                            added += 1
+                        else:
+                            logger.warning(f"[VectorOps] Thread {thread_id} already exists (ON CONFLICT DO NOTHING)")
                     conn.commit()
             except Exception as e:
-                logger.error(f"[VectorOps] Failed to insert thread: {e}")
+                logger.error(f"[VectorOps] Failed to insert thread {thread_id}: {e}", exc_info=True)
 
         logger.info(f"[VectorOps] Added {added} threads (project={project_id})")
         return added
