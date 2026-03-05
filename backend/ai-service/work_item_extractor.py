@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,12 @@ class WorkItemExtractor:
                             "(b) someone explicitly requests that a task, ticket, or work item be created, "
                             "(c) someone is explicitly assigned or asked to do something specific, "
                             "(d) someone says to note it down, log it, add it to the plan/sprint/backlog, "
-                            "(e) a specific phase, sprint, iteration, date, or time period is mentioned — meaning the item is explicitly scheduled. "
+                            "(e) a deliverable work item is explicitly tied to a specific sprint, iteration, or phase — meaning actual development/delivery work, NOT merely a date mentioned in passing. "
                             "The following do NOT qualify: future ideas with no timeline, vague aspirational wishes "
                             "('it would be nice if...', 'maybe someday...', 'we could consider...'), "
-                            "hypothetical discussions, and casual brainstorming with no explicit commitment or schedule. "
+                            "hypothetical discussions, casual brainstorming with no explicit commitment, "
+                            "scheduling or planning a future meeting/call/check-in (even with a specific date), "
+                            "and administrative decisions about when or where to meet. "
                             "Respond with JSON only."
                         ),
                     },
@@ -99,8 +102,11 @@ class WorkItemExtractor:
                             "(b) someone explicitly requests that a task, ticket, or work item be created, "
                             "(c) someone is explicitly assigned or asked to do something specific, "
                             "(d) someone explicitly says to note it down, log it, or add it to the plan/sprint/backlog, "
-                            "(e) a specific phase, sprint, iteration, date, month, or time period is mentioned in connection with the item. "
-                            "Do NOT extract vague future ideas, casual wishes, or brainstorming with no explicit commitment. "
+                            "(e) a deliverable work item is explicitly tied to a specific sprint, iteration, or phase — meaning actual development/delivery work scheduled in a sprint, NOT just a date mentioned in passing. "
+                            "Do NOT extract: vague future ideas, casual wishes, or brainstorming with no explicit commitment; "
+                            "scheduling or planning a future meeting, call, check-in, or follow-up session (even if a specific date is mentioned); "
+                            "adding agenda items for a future meeting; "
+                            "administrative decisions about when or where to meet next. "
                             "For each item also identify: "
                             "(1) item_type: 'Bug' if it is a defect/error/broken behavior; 'Issue' if it is a blocker/impediment/system problem; 'Task' for all other actionable items (features, improvements, follow-ups). "
                             "(2) assigned_to: the name of the person explicitly assigned or volunteered for this item in the conversation, or null if unclear. "
@@ -150,6 +156,9 @@ class WorkItemExtractor:
                     item_type = "Task"
                 assigned_to = item.get("assigned_to")
                 if assigned_to and str(assigned_to).lower() in ("null", "none", ""):
+                    assigned_to = None
+                if assigned_to and re.match(r'(?i)^speaker\s*\d+$', str(assigned_to).strip()):
+                    logger.info(f"[WorkItem] Clearing generic speaker label assigned_to='{assigned_to}'")
                     assigned_to = None
                 if is_immediate:
                     logger.info(f"[WorkItem] → keeping '{title}' type={item_type} assignee={assigned_to} (immediate: {reason})")

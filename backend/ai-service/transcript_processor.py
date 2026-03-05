@@ -23,23 +23,6 @@ def process_transcripts(messages: list, client: TeamsClient, chat_or_channel_bas
                     transcript_messages.extend(transcript_msgs)
                     logger.info(f"Parsed VTT attachment '{source_name}': {len(segments)} segments -> {len(transcript_msgs)} grouped entries")
 
-        if msg.get("message_type") == "meeting_event":
-            event_detail = msg.get("event_detail", {})
-            meeting_id = _extract_meeting_id(event_detail)
-            if meeting_id:
-                try:
-                    vtt_content = client.get_meeting_transcript(meeting_id)
-                    if vtt_content:
-                        segments = parse_vtt(vtt_content)
-                        if segments:
-                            transcript_msgs = vtt_segments_to_messages(
-                                segments, msg_id, created_at, "Meeting Recording"
-                            )
-                            transcript_messages.extend(transcript_msgs)
-                            logger.info(f"Fetched meeting transcript for {meeting_id}: {len(segments)} segments -> {len(transcript_msgs)} grouped entries")
-                except Exception as e:
-                    logger.warning(f"Failed to process meeting transcript for {meeting_id}: {e}")
-
     return transcript_messages
 
 

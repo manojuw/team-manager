@@ -85,6 +85,90 @@ class MessageProcessor:
             parts.append(header)
 
             attachments = msg.get("attachments", [])
+
+            if "callRecording" in event_type and recording_status and recording_status.lower() == "success" and self.audio_processor and self.teams_client:
+                recording_downloaded = False
+                for att in attachments:
+                    att_name = att.get("name") or "recording.mp4"
+                    content_url = att.get("content_url") or ""
+                    content_type_att = (att.get("content_type") or "").lower()
+                    card_content = att.get("card_content") or ""
+
+                    def _try_download_recording(att=att, content_url=content_url, card_content=card_content, msg=msg):
+                        if content_url:
+                            logger.info(f"[Processor] Trying recording download via content_url")
+                            data = self.teams_client.download_attachment_content(content_url)
+                            if data:
+                                return data
+                        if card_content:
+                            try:
+                                import json as _json
+                                card = _json.loads(card_content)
+                                body_items = card.get("body", [])
+                                for body_item in body_items:
+                                    for action in body_item.get("actions", []):
+                                        action_url = action.get("url", "")
+                                        if action_url:
+                                            logger.info(f"[Processor] Trying recording download via adaptive card action URL")
+                                            data = self.teams_client.download_attachment_content(action_url)
+                                            if data:
+                                                return data
+                                media_list = card.get("media", [])
+                                if media_list:
+                                    media_url = media_list[0].get("url", "")
+                                    if media_url:
+                                        logger.info(f"[Processor] Trying recording download via card media URL")
+                                        data = self.teams_client.download_attachment_content(media_url)
+                                        if data:
+                                            return data
+                            except Exception as _e:
+                                logger.warning(f"[Processor] Failed to parse card_content for recording URL: {_e}")
+                        source_base_url = msg.get("source_base_url", "")
+                        msg_id = msg.get("id", "")
+                        if source_base_url and msg_id:
+                            hosted = self.teams_client.list_message_hosted_contents(source_base_url, msg_id)
+                            logger.info(f"[Processor] Found {len(hosted)} hosted content(s) for recording message {msg_id}")
+                            for item in hosted:
+                                blob_id = item.get("id", "")
+                                if blob_id:
+                                    data = self.teams_client.download_hosted_content(source_base_url, msg_id, blob_id)
+                                    if data:
+                                        return data
+                        return b""
+
+                    is_video = (
+                        self.audio_processor.is_video_attachment(att)
+                        or "adaptive" in content_type_att
+                        or "card" in content_type_att
+                        or not content_type_att
+                    )
+                    if not is_video:
+                        continue
+
+                    try:
+                        logger.info(f"[Processor] Attempting to download meeting recording: {att_name}")
+                        video_bytes = _try_download_recording()
+                        if not video_bytes:
+                            logger.warning(f"[Processor] No bytes retrieved for recording attachment: {att_name}")
+                            continue
+                        logger.info(f"[Processor] Downloaded recording {att_name} ({len(video_bytes)} bytes), converting to MP3")
+                        mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, att_name)
+                        mp3_name = att_name.rsplit(".", 1)[0] + ".mp3"
+                        transcript = self.audio_processor.transcribe_audio(mp3_bytes, mp3_name)
+                        if transcript:
+                            parts.append(f"Meeting Recording Transcript:\n{transcript}")
+                            msg["has_video"] = True
+                            recording_downloaded = True
+                            logger.info(f"[Processor] Meeting recording transcribed: {len(transcript)} chars")
+                            break
+                        else:
+                            logger.warning(f"[Processor] Sarvam AI returned empty transcript for recording: {att_name}")
+                    except Exception as e:
+                        logger.warning(f"[Processor] Meeting recording transcription failed for {att_name}: {e}")
+
+                if not recording_downloaded:
+                    logger.info(f"[Processor] Could not transcribe recording for meeting event — no usable video data found")
+
             for att in attachments:
                 att_name = att.get("name") or att.get("content_type", "attachment")
                 content_url = att.get("content_url") or ""
