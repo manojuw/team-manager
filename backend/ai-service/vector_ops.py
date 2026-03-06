@@ -506,9 +506,9 @@ class VectorOps:
     def search_devops_candidates(self, queries: list, tenant_id: str, project_id: str, n_results: int = 5) -> list:
         scored = {}
         total = len(queries)
-        for i, q in enumerate(queries):
+        all_embeddings = get_embeddings_batch(queries)
+        for i, (q, emb) in enumerate(zip(queries, all_embeddings)):
             try:
-                emb = get_embedding(q)
                 emb_str = "[" + ",".join(str(x) for x in emb) + "]"
                 with self._get_conn() as conn:
                     with conn.cursor() as cur:

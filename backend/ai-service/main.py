@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 
 import psycopg2
 import psycopg2.extras
@@ -132,14 +133,13 @@ def _retro_match_work_items():
 
     logger.info(f"[RetroMatch] Checking {len(rows)} suggested work items with no DevOps link")
     openai_client = _make_openai_client()
-    matched = 0
 
-    for row in rows:
-        item_id, title, description, tenant_id, project_id = row
+    def _process_one_retro(row):
+        item_id, title, description, t_id, p_id = row
         desc = description or ""
         try:
             queries = _expand_queries_for_devops_match(openai_client, title, desc)
-            candidates = vector_ops.search_devops_candidates(queries, tenant_id, project_id, n_results=5)
+            candidates = vector_ops.search_devops_candidates(queries, t_id, p_id, n_results=5)
             linked = None
             for cand in candidates:
                 if cand["sim"] >= 0.35:
@@ -162,12 +162,17 @@ def _retro_match_work_items():
                 conn.commit()
                 conn.close()
                 logger.info(f"[RetroMatch] '{title}' → linked to DevOps {linked} (work_item_id={wi_id})")
-                matched += 1
+                return True
             else:
                 logger.info(f"[RetroMatch] '{title}' → no match found")
+                return False
         except Exception as e:
             logger.error(f"[RetroMatch] Error processing '{title}': {e}")
+            return False
 
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        results = list(ex.map(_process_one_retro, rows))
+    matched = sum(results)
     logger.info(f"[RetroMatch] Complete: {matched}/{len(rows)} items linked")
 
 
@@ -564,8 +569,10 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
     chat_threads = thread_engine.group_messages(chat_messages)
 
     processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-    processed_meeting = [r for r in (processor.process_thread(t) for t in meeting_threads) if r is not None]
-    processed_chat = [r for r in (processor.process_thread(t) for t in chat_threads) if r is not None]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        processed_meeting = [r for r in ex.map(processor.process_thread, meeting_threads) if r is not None]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        processed_chat = [r for r in ex.map(processor.process_thread, chat_threads) if r is not None]
 
     meeting_added = vector_ops.add_threads(
         processed_meeting, "microsoft_teams", "meeting", source_identifier,
@@ -586,7 +593,7 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
             )
 
     extractor = WorkItemExtractor(openai_client=openai_client)
-    for pt in processed_chat + processed_meeting:
+    def _analyze_and_store_channel(pt):
         work_items = extractor.analyze_thread(pt)
         if work_items:
             vector_ops.store_work_items(
@@ -594,6 +601,8 @@ def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
                 tenant_id, req.project_id, req.connector_id, req.data_source_id,
                 openai_client=openai_client
             )
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(_analyze_and_store_channel, processed_chat + processed_meeting))
 
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
                          added, len(messages), "microsoft_teams", "team_channel")
@@ -648,8 +657,10 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
     chat_threads = thread_engine.group_messages(chat_messages)
 
     processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-    processed_meeting = [r for r in (processor.process_thread(t) for t in meeting_threads) if r is not None]
-    processed_chat = [r for r in (processor.process_thread(t) for t in chat_threads) if r is not None]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        processed_meeting = [r for r in ex.map(processor.process_thread, meeting_threads) if r is not None]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        processed_chat = [r for r in ex.map(processor.process_thread, chat_threads) if r is not None]
 
     meeting_added = vector_ops.add_threads(
         processed_meeting, "microsoft_teams", "meeting", source_identifier,
@@ -670,7 +681,7 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
             )
 
     extractor = WorkItemExtractor(openai_client=openai_client)
-    for pt in processed_chat + processed_meeting:
+    def _analyze_and_store_groupchat(pt):
         work_items = extractor.analyze_thread(pt)
         if work_items:
             vector_ops.store_work_items(
@@ -678,6 +689,8 @@ def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
                 tenant_id, req.project_id, req.connector_id, req.data_source_id,
                 openai_client=openai_client
             )
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(_analyze_and_store_groupchat, processed_chat + processed_meeting))
 
     _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
                          added, len(messages), "microsoft_teams", "group_chat")

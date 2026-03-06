@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import requests
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -136,19 +137,23 @@ class AudioProcessor:
 
         logger.info(f"[Audio] Audio is {duration_s:.1f}s — splitting into 25s chunks")
         chunks = [audio[i:i + CHUNK_MS] for i in range(0, len(audio), CHUNK_MS)]
-        parts = []
-        for idx, chunk in enumerate(chunks, 1):
+        total = len(chunks)
+
+        def _export_and_send(args):
+            idx, chunk = args
             chunk_io = io.BytesIO()
             chunk.export(chunk_io, format="wav")
             chunk_bytes = chunk_io.getvalue()
             chunk_s = len(chunk) / 1000.0
-            logger.info(f"[Audio] Transcribing chunk {idx}/{len(chunks)} ({chunk_s:.1f}s, {len(chunk_bytes)} bytes)")
-            result = self._post_chunk(chunk_bytes, f"{base}_chunk{idx}.wav")
-            if result:
-                parts.append(result)
+            logger.info(f"[Audio] Transcribing chunk {idx}/{total} ({chunk_s:.1f}s, {len(chunk_bytes)} bytes)")
+            return self._post_chunk(chunk_bytes, f"{base}_chunk{idx}.wav")
 
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            results = list(executor.map(_export_and_send, enumerate(chunks, 1)))
+
+        parts = [r for r in results if r]
         transcript = " ".join(parts)
-        logger.info(f"[Audio] Merged {len(chunks)} chunks → {len(transcript)} chars total")
+        logger.info(f"[Audio] Merged {total} chunks → {len(transcript)} chars total")
         return transcript
 
     def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
