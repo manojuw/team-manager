@@ -69,6 +69,7 @@ interface WorkItem {
   linked_to_devops: boolean;
   devops_work_item_id: string | null;
   devops_work_item_title: string | null;
+  devops_work_item_url?: string | null;
   created_at: string | null;
   item_type?: string;
   assigned_to?: string | null;
@@ -815,8 +816,21 @@ export default function ThreadsPage() {
                                       </p>
                                     )}
                                     {item.linked_to_devops && item.devops_work_item_title && (
-                                      <p className="text-xs text-muted-foreground mt-0.5 truncate">
-                                        DevOps: {item.devops_work_item_title}
+                                      <p className="text-xs mt-0.5 truncate">
+                                        {item.devops_work_item_url ? (
+                                          <a
+                                            href={item.devops_work_item_url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="inline-flex items-center gap-1 text-blue-600 hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                          >
+                                            <ExternalLink className="h-3 w-3 flex-shrink-0" />
+                                            {item.devops_work_item_title}
+                                          </a>
+                                        ) : (
+                                          <span className="text-muted-foreground">DevOps: {item.devops_work_item_title}</span>
+                                        )}
                                       </p>
                                     )}
                                   </div>
@@ -828,10 +842,23 @@ export default function ThreadsPage() {
                                     )}
                                     {item.linked_to_devops && (
                                       <>
-                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 border border-green-200">
-                                          <GitBranch className="h-3 w-3" />
-                                          {item.devops_work_item_id ? `#${item.devops_work_item_id}` : "DevOps"}
-                                        </span>
+                                        {item.devops_work_item_url ? (
+                                          <a
+                                            href={item.devops_work_item_url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 transition-colors"
+                                          >
+                                            <GitBranch className="h-3 w-3" />
+                                            {item.devops_work_item_id ? `#${item.devops_work_item_id}` : "DevOps"}
+                                          </a>
+                                        ) : (
+                                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700 border border-green-200">
+                                            <GitBranch className="h-3 w-3" />
+                                            {item.devops_work_item_id ? `#${item.devops_work_item_id}` : "DevOps"}
+                                          </span>
+                                        )}
                                         <button
                                           onClick={() => toggleWorkItemDetail(item)}
                                           className={`p-1 rounded hover:bg-muted transition-colors ${isExpanded ? "text-primary" : "text-muted-foreground"}`}

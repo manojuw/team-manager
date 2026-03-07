@@ -1165,24 +1165,54 @@ def get_thread_work_items(thread_id: str, user=Depends(verify_token)):
                 cur.execute(
                     """SELECT id, title, description, status, semantic_data_id, created_at,
                               devops_work_item_id, devops_work_item_title,
-                              item_type, assigned_to, parent_id
+                              item_type, assigned_to, parent_id, project_id::text
                        FROM suggested_work_item
                        WHERE thread_id = %s AND tenant_id = %s
                        ORDER BY created_at""",
                     (thread_id, tenant_id),
                 )
                 rows = cur.fetchall()
+
+        devops_base_url = None
+        linked_rows = [r for r in rows if r[6]]
+        if linked_rows:
+            project_id = linked_rows[0][11]
+            try:
+                with vector_ops._get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT connector_id, config FROM data_source
+                               WHERE project_id = %s AND tenant_id = %s
+                                 AND source_type = 'devops_project'
+                               LIMIT 1""",
+                            (project_id, tenant_id),
+                        )
+                        ds_row = cur.fetchone()
+                if ds_row:
+                    ds_connector_id = str(ds_row[0])
+                    ds_config = ds_row[1] if isinstance(ds_row[1], dict) else (json.loads(ds_row[1]) if ds_row[1] else {})
+                    project_name = ds_config.get("devops_project_name", "")
+                    connector_cfg = _get_connector_config(ds_connector_id, tenant_id)
+                    organization = connector_cfg.get("organization", "")
+                    if organization and project_name:
+                        devops_base_url = f"https://dev.azure.com/{organization}/{project_name}/_workitems/edit"
+            except Exception as e:
+                logger.warning(f"[WorkItems] Could not build DevOps URL: {e}")
+
         result = []
         for row in rows:
+            wi_id = row[6]
+            devops_url = f"{devops_base_url}/{wi_id}" if (devops_base_url and wi_id) else None
             result.append({
                 "id": str(row[0]),
                 "title": row[1],
                 "description": row[2] or "",
                 "status": row[3] or "pending",
                 "semantic_data_id": str(row[4]) if row[4] else None,
-                "linked_to_devops": bool(row[4]),
-                "devops_work_item_id": row[6],
+                "linked_to_devops": bool(wi_id),
+                "devops_work_item_id": wi_id,
                 "devops_work_item_title": row[7],
+                "devops_work_item_url": devops_url,
                 "created_at": row[5].isoformat() if row[5] else None,
                 "item_type": row[8] or "Task",
                 "assigned_to": row[9],
