@@ -1,7 +1,10 @@
+import collections
 import io
 import hashlib
 import logging
 import os
+import threading
+import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
 import local_store
@@ -10,7 +13,31 @@ logger = logging.getLogger(__name__)
 
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
-CHUNK_MS = 25_000
+CHUNK_MS = 30_000
+
+
+class _RateLimiter:
+    """Sliding-window rate limiter: at most max_calls per period seconds."""
+    def __init__(self, max_calls: int, period: float):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls: collections.deque = collections.deque()
+        self.lock = threading.Lock()
+
+    def acquire(self):
+        while True:
+            with self.lock:
+                now = time.monotonic()
+                while self.calls and self.calls[0] <= now - self.period:
+                    self.calls.popleft()
+                if len(self.calls) < self.max_calls:
+                    self.calls.append(now)
+                    return
+                wait = self.period - (now - self.calls[0]) + 0.05
+            time.sleep(wait)
+
+
+_sarvam_limiter = _RateLimiter(max_calls=55, period=60)
 
 AUDIO_MIME_TYPES = {
     "audio/amr", "audio/mpeg", "audio/mp3", "audio/ogg",
@@ -104,6 +131,7 @@ class AudioProcessor:
         return result
 
     def _post_chunk(self, wav_bytes: bytes, filename: str) -> str:
+        _sarvam_limiter.acquire()
         response = None
         try:
             response = requests.post(
