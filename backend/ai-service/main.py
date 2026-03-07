@@ -113,14 +113,15 @@ def _run_migrations():
 
 
 def _retro_match_work_items():
-    from vector_ops import _expand_queries_for_devops_match, _confirm_devops_match_with_gpt
+    import re as _re_rm
+    from vector_ops import _confirm_devops_match_with_gpt
     try:
         conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT id, title, description, tenant_id::text, project_id
+                """SELECT id, title, description, tenant_id::text, project_id::text
                    FROM suggested_work_item
-                   WHERE semantic_data_id IS NULL AND embedding IS NOT NULL"""
+                   WHERE devops_work_item_id IS NULL AND embedding IS NOT NULL"""
             )
             rows = cur.fetchall()
         conn.close()
@@ -135,43 +136,122 @@ def _retro_match_work_items():
     logger.info(f"[RetroMatch] Checking {len(rows)} suggested work items with no DevOps link")
     openai_client = _make_openai_client()
 
+    unique_pairs = list({(r[4], r[3]) for r in rows})
+    devops_ds_cache = {}
+    for p_id, t_id in unique_pairs:
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT connector_id, config FROM data_source
+                       WHERE project_id = %s AND tenant_id = %s AND source_type = 'devops_project'
+                       LIMIT 1""",
+                    (p_id, t_id),
+                )
+                row = cur.fetchone()
+            conn.close()
+            if row:
+                cfg = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else {})
+                devops_ds_cache[(p_id, t_id)] = {
+                    "connector_id": str(row[0]),
+                    "devops_project_name": cfg.get("devops_project_name", ""),
+                }
+            else:
+                devops_ds_cache[(p_id, t_id)] = None
+        except Exception as e:
+            logger.warning(f"[RetroMatch] Failed to look up DevOps data source for project {p_id}: {e}")
+            devops_ds_cache[(p_id, t_id)] = None
+
+    _STOP_WORDS = {"the", "for", "and", "with", "that", "this", "from", "are",
+                   "was", "has", "add", "all", "task", "item", "work"}
+
+    def _make_wiql_or_clause(title: str) -> str:
+        clean = _re_rm.sub(r"['\"]", "", title)
+        clean = _re_rm.sub(r"[^\w\s]", " ", clean)
+        words = [w for w in clean.split()
+                 if len(w) >= 4 and w.lower() not in _STOP_WORDS]
+        unique_words = list(dict.fromkeys(words))[:4]
+        if not unique_words:
+            unique_words = [w for w in clean.split() if len(w) >= 3][:3]
+        conditions = " OR ".join(
+            [f"[System.Title] CONTAINS WORDS '{w}'" for w in unique_words]
+        )
+        return conditions
+
     def _process_one_retro(row):
         item_id, title, description, t_id, p_id = row
         desc = description or ""
         try:
-            queries = _expand_queries_for_devops_match(openai_client, title, desc)
-            candidates = vector_ops.search_devops_candidates(queries, t_id, p_id, n_results=5)
-            linked = None
-            for cand in candidates:
-                if cand["sim"] >= 0.35:
-                    confirmed = _confirm_devops_match_with_gpt(
-                        openai_client, title, desc, cand["content"]
-                    )
-                    if confirmed:
-                        linked = cand["id"]
-                        break
-            if linked:
-                linked_cand = next((c for c in candidates if c["id"] == linked), {})
-                wi_id = linked_cand.get("devops_work_item_id")
-                wi_title = linked_cand.get("devops_work_item_title")
-                conn = psycopg2.connect(DATABASE_URL)
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE suggested_work_item SET semantic_data_id = %s, devops_work_item_id = %s, devops_work_item_title = %s WHERE id = %s",
-                        (linked, wi_id, wi_title, item_id),
-                    )
-                conn.commit()
-                conn.close()
-                logger.info(f"[RetroMatch] '{title}' → linked to DevOps {linked} (work_item_id={wi_id})")
-                return True
-            else:
-                logger.info(f"[RetroMatch] '{title}' → no match found")
+            ds = devops_ds_cache.get((p_id, t_id))
+            if not ds:
+                logger.info(f"[RetroMatch] '{title}' → no DevOps data source found, skipping")
                 return False
+            devops_connector_id = ds["connector_id"]
+            devops_project_name = ds["devops_project_name"]
+            if not devops_project_name:
+                logger.info(f"[RetroMatch] '{title}' → DevOps project name not configured, skipping")
+                return False
+            try:
+                client = _get_devops_client(devops_connector_id, t_id)
+            except Exception as e:
+                logger.warning(f"[RetroMatch] '{title}' → DevOps client error: {e}")
+                return False
+            or_clause = _make_wiql_or_clause(title)
+            wiql = (
+                f"SELECT [System.Id] FROM WorkItems "
+                f"WHERE [System.TeamProject] = '{devops_project_name}' "
+                f"AND ({or_clause}) "
+                f"ORDER BY [System.ChangedDate] DESC"
+            )
+            logger.info(f"[RetroMatch] '{title}' WIQL clause: {or_clause}")
+            try:
+                work_item_refs = client.get_work_items(devops_project_name, wiql_query=wiql)
+            except Exception as e:
+                logger.warning(f"[RetroMatch] '{title}' → WIQL search failed: {e}")
+                return False
+            if not work_item_refs:
+                logger.info(f"[RetroMatch] '{title}' → no DevOps candidates from WIQL search")
+                return False
+            ids = [wi["id"] for wi in work_item_refs[:10]]
+            try:
+                details = client.get_work_item_details(devops_project_name, ids)
+            except Exception as e:
+                logger.warning(f"[RetroMatch] '{title}' → get_work_item_details failed: {e}")
+                return False
+            logger.info(f"[RetroMatch] '{title}' → {len(details)} DevOps candidates from WIQL")
+            for item in details:
+                raw_desc = item.get("description", "") or ""
+                raw_desc = _re_rm.sub(r"<[^>]+>", " ", raw_desc)
+                raw_desc = _re_rm.sub(r"\s+", " ", raw_desc).strip()
+                devops_content = "\n".join([
+                    f"[Work Item #{item['id']}] {item.get('title', '')}",
+                    f"[Type: {item.get('work_item_type', '')}] [State: {item.get('state', '')}]",
+                    f"[Assigned To: {item.get('assigned_to', 'Unassigned')}]",
+                ])
+                if raw_desc:
+                    devops_content += f"\nDescription: {raw_desc[:300]}"
+                logger.info(f"  Checking DevOps #{item['id']}: '{item.get('title', '')}'")
+                confirmed = _confirm_devops_match_with_gpt(openai_client, title, desc, devops_content)
+                if confirmed:
+                    wi_id = str(item["id"])
+                    wi_title = item.get("title", "")
+                    conn = psycopg2.connect(DATABASE_URL)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE suggested_work_item SET devops_work_item_id = %s, devops_work_item_title = %s WHERE id = %s",
+                            (wi_id, wi_title, item_id),
+                        )
+                    conn.commit()
+                    conn.close()
+                    logger.info(f"[RetroMatch] '{title}' → linked to DevOps #{wi_id} '{wi_title}'")
+                    return True
+            logger.info(f"[RetroMatch] '{title}' → no confirmed match in {len(details)} candidates")
+            return False
         except Exception as e:
             logger.error(f"[RetroMatch] Error processing '{title}': {e}")
             return False
 
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:
         results = list(ex.map(_process_one_retro, rows))
     matched = sum(results)
     logger.info(f"[RetroMatch] Complete: {matched}/{len(rows)} items linked")
@@ -623,6 +703,7 @@ def _do_sync_channel(job_id: str, req, tenant_id: str):
         }
         local_store.complete_job(job_id, result)
         logger.info(f"[SyncChannel] Job {job_id} completed: {result}")
+        _retro_match_work_items()
     except Exception as e:
         logger.error(f"[SyncChannel] Job {job_id} failed: {e}", exc_info=True)
         local_store.fail_job(job_id, str(e))
@@ -721,6 +802,7 @@ def _do_sync_group_chat(job_id: str, req, tenant_id: str):
         }
         local_store.complete_job(job_id, result)
         logger.info(f"[SyncGroupChat] Job {job_id} completed: {result}")
+        _retro_match_work_items()
     except Exception as e:
         logger.error(f"[SyncGroupChat] Job {job_id} failed: {e}", exc_info=True)
         local_store.fail_job(job_id, str(e))
@@ -741,6 +823,14 @@ def get_sync_job_status(job_id: str, user=Depends(verify_token)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+@app.post("/api/sync/retro-match")
+def trigger_retro_match(user=Depends(verify_token)):
+    import threading
+    t = threading.Thread(target=_retro_match_work_items, daemon=True)
+    t.start()
+    return {"status": "triggered"}
 
 
 @app.post("/api/devops/list-projects")
