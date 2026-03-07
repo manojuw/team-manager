@@ -35,6 +35,12 @@ CLARIFY_SYSTEM_PROMPT = (
     "- Do not add commentary, headers, or extra text."
 )
 
+_REFUSAL_PHRASES = (
+    "i'm sorry", "i am sorry", "i can't assist", "i cannot assist",
+    "i'm unable", "i am unable", "i cannot help", "i can't help",
+    "i'm not able", "i am not able",
+)
+
 
 class MessageProcessor:
     def __init__(self, openai_client, audio_processor=None, teams_client=None):
@@ -427,6 +433,12 @@ class MessageProcessor:
                 max_tokens=4096,
             )
             clarified = response.choices[0].message.content.strip()
+            if any(phrase in clarified.lower() for phrase in _REFUSAL_PHRASES):
+                logger.warning(
+                    f"[Processor] OpenAI refused clarification (response: {clarified[:80]}), "
+                    f"falling back to raw text ({len(raw_text)} chars)"
+                )
+                return raw_text
             logger.info(f"[Processor] Clarified thread: {len(raw_text)} chars -> {len(clarified)} chars")
             return clarified
         except Exception as e:
@@ -520,7 +532,7 @@ class MessageProcessor:
             logger.info("[Processor] Dropping meeting thread — no transcript could be extracted")
             return None
 
-        clarified = self.clarify_thread(raw_text)
+        clarified = self.clarify_thread(raw_text[:32000])
         embedding = self.embed_text(clarified) if clarified else []
         plan = self._generate_thread_plan(clarified) if clarified else {"summary": "", "task_planning": ""}
 
