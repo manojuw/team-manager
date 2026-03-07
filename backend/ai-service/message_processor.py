@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 from typing import Optional
@@ -97,7 +98,8 @@ class MessageProcessor:
                 return None
             logger.info(f"[Processor] Downloaded {len(video_bytes)} bytes for {label}, converting to MP3")
             mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, "recording.mp4")
-            transcript = self.audio_processor.transcribe_audio(mp3_bytes, "recording.mp3")
+            cache_key = hashlib.md5(url.encode()).hexdigest()
+            transcript = self.audio_processor.transcribe_audio(mp3_bytes, "recording.mp3", cache_key=cache_key)
             if transcript:
                 logger.info(f"[Processor] Recording transcribed: {len(transcript)} chars")
                 return transcript

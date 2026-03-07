@@ -1,8 +1,10 @@
 import io
+import hashlib
 import logging
 import os
 import requests
 from concurrent.futures import ThreadPoolExecutor
+import local_store
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +129,7 @@ class AudioProcessor:
             logger.error(f"[Audio] Chunk request failed for {filename}: {e}")
             return ""
 
-    def _transcribe_wav_bytes(self, wav_bytes: bytes, base: str) -> str:
+    def _transcribe_wav_bytes(self, wav_bytes: bytes, base: str, cache_key: str = "") -> str:
         from pydub import AudioSegment
         audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
         duration_s = len(audio) / 1000.0
@@ -141,14 +143,22 @@ class AudioProcessor:
 
         def _export_and_send(args):
             idx, chunk = args
+            if cache_key:
+                cached = local_store.cache_get_chunk(cache_key, idx)
+                if cached is not None:
+                    logger.info(f"[Audio] Chunk {idx}/{total} loaded from cache")
+                    return cached
             chunk_io = io.BytesIO()
             chunk.export(chunk_io, format="wav")
             chunk_bytes = chunk_io.getvalue()
             chunk_s = len(chunk) / 1000.0
             logger.info(f"[Audio] Transcribing chunk {idx}/{total} ({chunk_s:.1f}s, {len(chunk_bytes)} bytes)")
-            return self._post_chunk(chunk_bytes, f"{base}_chunk{idx}.wav")
+            result = self._post_chunk(chunk_bytes, f"{base}_chunk{idx}.wav")
+            if result and cache_key:
+                local_store.cache_set_chunk(cache_key, idx, result)
+            return result
 
-        with ThreadPoolExecutor(max_workers=6) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             results = list(executor.map(_export_and_send, enumerate(chunks, 1)))
 
         parts = [r for r in results if r]
@@ -156,7 +166,7 @@ class AudioProcessor:
         logger.info(f"[Audio] Merged {total} chunks → {len(transcript)} chars total")
         return transcript
 
-    def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav") -> str:
+    def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav", cache_key: str = "") -> str:
         if not SARVAM_API_KEY:
             logger.warning("[Audio] SARVAM_API_KEY not set, skipping transcription")
             return ""
@@ -171,4 +181,4 @@ class AudioProcessor:
             logger.warning(f"[Audio] WAV conversion failed for {base}.{detected_ext}: {e}")
             return ""
 
-        return self._transcribe_wav_bytes(wav_bytes, base)
+        return self._transcribe_wav_bytes(wav_bytes, base, cache_key=cache_key)

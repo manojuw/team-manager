@@ -527,9 +527,8 @@ function ConnectorCard({
   async function syncNow(source: DataSourceItem) {
     setSyncingSourceId(source.id);
     try {
-      let result;
       if (source.source_type === "team_channel") {
-        result = await teams.syncChannel({
+        const res = await teams.syncChannel({
           project_id: currentProject.id,
           connector_id: connector.id,
           data_source_id: source.id,
@@ -538,30 +537,72 @@ function ConnectorCard({
           channel_id: source.config.channel_id,
           channel_name: source.config.channel_name,
         });
+        toast.success("Sync started — processing in background");
+        const pollJob = async () => {
+          try {
+            const job = await teams.syncJobStatus(res.job_id);
+            if (job.status === "completed") {
+              const r = job.result || {};
+              toast.success(`Sync complete: ${r.added ?? 0} new items added (${r.total_fetched ?? 0} fetched)`);
+              setSyncingSourceId(null);
+              await fetchSources();
+            } else if (job.status === "failed") {
+              toast.error(`Sync failed: ${job.error || "Unknown error"}`);
+              setSyncingSourceId(null);
+            } else {
+              setTimeout(pollJob, 4000);
+            }
+          } catch {
+            toast.error("Failed to check sync status");
+            setSyncingSourceId(null);
+          }
+        };
+        setTimeout(pollJob, 4000);
       } else if (source.source_type === "group_chat") {
-        result = await teams.syncGroupChat({
+        const res = await teams.syncGroupChat({
           project_id: currentProject.id,
           connector_id: connector.id,
           data_source_id: source.id,
           chat_id: source.config.chat_id,
           chat_name: source.config.chat_name,
         });
+        toast.success("Sync started — processing in background");
+        const pollJob = async () => {
+          try {
+            const job = await teams.syncJobStatus(res.job_id);
+            if (job.status === "completed") {
+              const r = job.result || {};
+              toast.success(`Sync complete: ${r.added ?? 0} new items added (${r.total_fetched ?? 0} fetched)`);
+              setSyncingSourceId(null);
+              await fetchSources();
+            } else if (job.status === "failed") {
+              toast.error(`Sync failed: ${job.error || "Unknown error"}`);
+              setSyncingSourceId(null);
+            } else {
+              setTimeout(pollJob, 4000);
+            }
+          } catch {
+            toast.error("Failed to check sync status");
+            setSyncingSourceId(null);
+          }
+        };
+        setTimeout(pollJob, 4000);
       } else if (source.source_type === "devops_project") {
-        result = await devops.syncProject({
+        const result = await devops.syncProject({
           project_id: currentProject.id,
           connector_id: connector.id,
           data_source_id: source.id,
           devops_project_id: source.config.devops_project_id,
           devops_project_name: source.config.devops_project_name,
         });
+        const added = result?.added ?? 0;
+        const fetched = result?.total_fetched ?? 0;
+        toast.success(`Sync complete: ${added} new items added (${fetched} fetched)`);
+        await fetchSources();
+        setSyncingSourceId(null);
       }
-      const added = result?.added ?? 0;
-      const fetched = result?.total_fetched ?? 0;
-      toast.success(`Sync complete: ${added} new items added (${fetched} fetched)`);
-      await fetchSources();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Sync failed");
-    } finally {
       setSyncingSourceId(null);
     }
   }

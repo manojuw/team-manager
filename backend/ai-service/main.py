@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 import psycopg2
 import psycopg2.extras
 import requests
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -28,6 +28,7 @@ from thread_engine import ThreadEngine, _parse_dt, build_meeting_threads
 from message_processor import MessageProcessor
 from audio_processor import AudioProcessor
 from work_item_extractor import WorkItemExtractor
+import local_store
 from work_item_search import WorkItemSearch
 from openai import OpenAI as _OpenAI
 
@@ -170,7 +171,7 @@ def _retro_match_work_items():
             logger.error(f"[RetroMatch] Error processing '{title}': {e}")
             return False
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(_process_one_retro, rows))
     matched = sum(results)
     logger.info(f"[RetroMatch] Complete: {matched}/{len(rows)} items linked")
@@ -334,6 +335,7 @@ def _retro_generate_thread_plans():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    local_store.init_db()
     _run_migrations()
     _retro_match_work_items()
     _retro_generate_thread_plans()
@@ -535,182 +537,210 @@ def list_group_chats(req: ListGroupChatsRequest, user=Depends(verify_token)):
     return {"chats": chats}
 
 
+def _do_sync_channel(job_id: str, req, tenant_id: str):
+    try:
+        client = _get_teams_client(req.connector_id, tenant_id)
+
+        source_identifier = {
+            "team_id": req.team_id,
+            "team_name": req.team_name,
+            "channel_id": req.channel_id,
+            "channel_name": req.channel_name,
+        }
+
+        last_sync = vector_ops.get_last_sync(req.data_source_id)
+        since = None
+        if last_sync != "Never":
+            try:
+                since = datetime.fromisoformat(last_sync)
+            except (ValueError, TypeError):
+                since = None
+
+        messages = client.get_channel_messages(req.team_id, req.channel_id, since=since)
+
+        vector_ops.insert_raw_messages(
+            messages, "microsoft_teams", "team_channel",
+            req.project_id, tenant_id, req.connector_id, req.data_source_id
+        )
+
+        meeting_threads, chat_messages = build_meeting_threads(messages)
+
+        openai_client = _make_openai_client()
+        thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
+        chat_threads = thread_engine.group_messages(chat_messages)
+
+        processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            processed_meeting = [r for r in ex.map(processor.process_thread, meeting_threads) if r is not None]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            processed_chat = [r for r in ex.map(processor.process_thread, chat_threads) if r is not None]
+
+        meeting_added = vector_ops.add_threads(
+            processed_meeting, "microsoft_teams", "meeting", source_identifier,
+            req.project_id, tenant_id, req.connector_id, req.data_source_id
+        )
+        chat_added = vector_ops.add_threads(
+            processed_chat, "microsoft_teams", "team_channel", source_identifier,
+            req.project_id, tenant_id, req.connector_id, req.data_source_id
+        )
+        added = meeting_added + chat_added
+
+        all_threads = meeting_threads + chat_threads
+        for thread in all_threads:
+            msg_ids = [m["id"] for m in thread.get("messages", []) if m.get("id")]
+            if msg_ids:
+                vector_ops.update_thread_message_thread_ids(
+                    thread["id"], msg_ids, req.connector_id, req.data_source_id
+                )
+
+        extractor = WorkItemExtractor(openai_client=openai_client)
+        def _analyze_and_store_channel(pt):
+            work_items = extractor.analyze_thread(pt)
+            if work_items:
+                vector_ops.store_work_items(
+                    work_items, pt["id"],
+                    tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                    openai_client=openai_client
+                )
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_analyze_and_store_channel, processed_chat + processed_meeting))
+
+        _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                             added, len(messages), "microsoft_teams", "team_channel")
+
+        if req.data_source_id:
+            _update_data_source_last_sync(req.data_source_id)
+
+        processed_threads = processed_meeting + processed_chat
+        result = {
+            "added": added,
+            "total_fetched": len(messages),
+            "threads": len(processed_threads),
+            "meeting_threads": len(processed_meeting),
+            "chat_threads": len(processed_chat),
+            "audio_transcribed": sum(1 for t in processed_threads if t.get("has_audio")),
+            "video_transcribed": sum(1 for t in processed_threads if t.get("has_video")),
+        }
+        local_store.complete_job(job_id, result)
+        logger.info(f"[SyncChannel] Job {job_id} completed: {result}")
+    except Exception as e:
+        logger.error(f"[SyncChannel] Job {job_id} failed: {e}", exc_info=True)
+        local_store.fail_job(job_id, str(e))
+
+
 @app.post("/api/sync/channel")
-def sync_channel(req: SyncChannelRequest, user=Depends(verify_token)):
+def sync_channel(req: SyncChannelRequest, background_tasks: BackgroundTasks, user=Depends(verify_token)):
     tenant_id = user["tenantId"]
-    client = _get_teams_client(req.connector_id, tenant_id)
+    job_id = str(_uuid.uuid4())
+    local_store.create_job(job_id, tenant_id, req.data_source_id, req.connector_id, req.project_id, "team_channel")
+    background_tasks.add_task(_do_sync_channel, job_id, req, tenant_id)
+    return {"job_id": job_id, "status": "running"}
 
-    source_identifier = {
-        "team_id": req.team_id,
-        "team_name": req.team_name,
-        "channel_id": req.channel_id,
-        "channel_name": req.channel_name,
-    }
 
-    last_sync = vector_ops.get_last_sync(req.data_source_id)
-    since = None
-    if last_sync != "Never":
-        try:
-            since = datetime.fromisoformat(last_sync)
-        except (ValueError, TypeError):
-            since = None
+def _do_sync_group_chat(job_id: str, req, tenant_id: str):
+    try:
+        client = _get_teams_client(req.connector_id, tenant_id)
 
-    messages = client.get_channel_messages(req.team_id, req.channel_id, since=since)
+        source_identifier = {
+            "chat_id": req.chat_id,
+            "chat_name": req.chat_name,
+        }
 
-    vector_ops.insert_raw_messages(
-        messages, "microsoft_teams", "team_channel",
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
+        last_sync = vector_ops.get_last_sync(req.data_source_id)
+        since = None
+        if last_sync != "Never":
+            try:
+                since = datetime.fromisoformat(last_sync)
+            except (ValueError, TypeError):
+                since = None
 
-    meeting_threads, chat_messages = build_meeting_threads(messages)
+        messages = client.get_chat_messages(req.chat_id, since=since)
 
-    openai_client = _make_openai_client()
-    thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
-    chat_threads = thread_engine.group_messages(chat_messages)
+        vector_ops.insert_raw_messages(
+            messages, "microsoft_teams", "group_chat",
+            req.project_id, tenant_id, req.connector_id, req.data_source_id
+        )
 
-    processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        processed_meeting = [r for r in ex.map(processor.process_thread, meeting_threads) if r is not None]
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        processed_chat = [r for r in ex.map(processor.process_thread, chat_threads) if r is not None]
+        meeting_threads, chat_messages = build_meeting_threads(messages)
 
-    meeting_added = vector_ops.add_threads(
-        processed_meeting, "microsoft_teams", "meeting", source_identifier,
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
-    chat_added = vector_ops.add_threads(
-        processed_chat, "microsoft_teams", "team_channel", source_identifier,
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
-    added = meeting_added + chat_added
+        openai_client = _make_openai_client()
+        thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
+        chat_threads = thread_engine.group_messages(chat_messages)
 
-    all_threads = meeting_threads + chat_threads
-    for thread in all_threads:
-        msg_ids = [m["id"] for m in thread.get("messages", []) if m.get("id")]
-        if msg_ids:
-            vector_ops.update_thread_message_thread_ids(
-                thread["id"], msg_ids, req.connector_id, req.data_source_id
-            )
+        processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            processed_meeting = [r for r in ex.map(processor.process_thread, meeting_threads) if r is not None]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            processed_chat = [r for r in ex.map(processor.process_thread, chat_threads) if r is not None]
 
-    extractor = WorkItemExtractor(openai_client=openai_client)
-    def _analyze_and_store_channel(pt):
-        work_items = extractor.analyze_thread(pt)
-        if work_items:
-            vector_ops.store_work_items(
-                work_items, pt["id"],
-                tenant_id, req.project_id, req.connector_id, req.data_source_id,
-                openai_client=openai_client
-            )
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        list(ex.map(_analyze_and_store_channel, processed_chat + processed_meeting))
+        meeting_added = vector_ops.add_threads(
+            processed_meeting, "microsoft_teams", "meeting", source_identifier,
+            req.project_id, tenant_id, req.connector_id, req.data_source_id
+        )
+        chat_added = vector_ops.add_threads(
+            processed_chat, "microsoft_teams", "group_chat", source_identifier,
+            req.project_id, tenant_id, req.connector_id, req.data_source_id
+        )
+        added = meeting_added + chat_added
 
-    _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
-                         added, len(messages), "microsoft_teams", "team_channel")
+        all_threads = meeting_threads + chat_threads
+        for thread in all_threads:
+            msg_ids = [m["id"] for m in thread.get("messages", []) if m.get("id")]
+            if msg_ids:
+                vector_ops.update_thread_message_thread_ids(
+                    thread["id"], msg_ids, req.connector_id, req.data_source_id
+                )
 
-    if req.data_source_id:
-        _update_data_source_last_sync(req.data_source_id)
+        extractor = WorkItemExtractor(openai_client=openai_client)
+        def _analyze_and_store_groupchat(pt):
+            work_items = extractor.analyze_thread(pt)
+            if work_items:
+                vector_ops.store_work_items(
+                    work_items, pt["id"],
+                    tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                    openai_client=openai_client
+                )
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(_analyze_and_store_groupchat, processed_chat + processed_meeting))
 
-    processed_threads = processed_meeting + processed_chat
-    audio_count = sum(1 for t in processed_threads if t.get("has_audio"))
-    video_count = sum(1 for t in processed_threads if t.get("has_video"))
+        _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
+                             added, len(messages), "microsoft_teams", "group_chat")
 
-    return {
-        "added": added,
-        "total_fetched": len(messages),
-        "threads": len(processed_threads),
-        "meeting_threads": len(processed_meeting),
-        "chat_threads": len(processed_chat),
-        "audio_transcribed": audio_count,
-        "video_transcribed": video_count,
-    }
+        if req.data_source_id:
+            _update_data_source_last_sync(req.data_source_id)
+
+        processed_threads = processed_meeting + processed_chat
+        result = {
+            "added": added,
+            "total_fetched": len(messages),
+            "threads": len(processed_threads),
+            "meeting_threads": len(processed_meeting),
+            "chat_threads": len(processed_chat),
+            "audio_transcribed": sum(1 for t in processed_threads if t.get("has_audio")),
+            "video_transcribed": sum(1 for t in processed_threads if t.get("has_video")),
+        }
+        local_store.complete_job(job_id, result)
+        logger.info(f"[SyncGroupChat] Job {job_id} completed: {result}")
+    except Exception as e:
+        logger.error(f"[SyncGroupChat] Job {job_id} failed: {e}", exc_info=True)
+        local_store.fail_job(job_id, str(e))
 
 
 @app.post("/api/sync/group-chat")
-def sync_group_chat(req: SyncGroupChatRequest, user=Depends(verify_token)):
+def sync_group_chat(req: SyncGroupChatRequest, background_tasks: BackgroundTasks, user=Depends(verify_token)):
     tenant_id = user["tenantId"]
-    client = _get_teams_client(req.connector_id, tenant_id)
+    job_id = str(_uuid.uuid4())
+    local_store.create_job(job_id, tenant_id, req.data_source_id, req.connector_id, req.project_id, "group_chat")
+    background_tasks.add_task(_do_sync_group_chat, job_id, req, tenant_id)
+    return {"job_id": job_id, "status": "running"}
 
-    source_identifier = {
-        "chat_id": req.chat_id,
-        "chat_name": req.chat_name,
-    }
 
-    last_sync = vector_ops.get_last_sync(req.data_source_id)
-    since = None
-    if last_sync != "Never":
-        try:
-            since = datetime.fromisoformat(last_sync)
-        except (ValueError, TypeError):
-            since = None
-
-    messages = client.get_chat_messages(req.chat_id, since=since)
-
-    vector_ops.insert_raw_messages(
-        messages, "microsoft_teams", "group_chat",
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
-
-    meeting_threads, chat_messages = build_meeting_threads(messages)
-
-    openai_client = _make_openai_client()
-    thread_engine = ThreadEngine(time_window_minutes=60, lookback_count=10, openai_client=openai_client)
-    chat_threads = thread_engine.group_messages(chat_messages)
-
-    processor = MessageProcessor(openai_client=openai_client, audio_processor=_audio_processor, teams_client=client)
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        processed_meeting = [r for r in ex.map(processor.process_thread, meeting_threads) if r is not None]
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        processed_chat = [r for r in ex.map(processor.process_thread, chat_threads) if r is not None]
-
-    meeting_added = vector_ops.add_threads(
-        processed_meeting, "microsoft_teams", "meeting", source_identifier,
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
-    chat_added = vector_ops.add_threads(
-        processed_chat, "microsoft_teams", "group_chat", source_identifier,
-        req.project_id, tenant_id, req.connector_id, req.data_source_id
-    )
-    added = meeting_added + chat_added
-
-    all_threads = meeting_threads + chat_threads
-    for thread in all_threads:
-        msg_ids = [m["id"] for m in thread.get("messages", []) if m.get("id")]
-        if msg_ids:
-            vector_ops.update_thread_message_thread_ids(
-                thread["id"], msg_ids, req.connector_id, req.data_source_id
-            )
-
-    extractor = WorkItemExtractor(openai_client=openai_client)
-    def _analyze_and_store_groupchat(pt):
-        work_items = extractor.analyze_thread(pt)
-        if work_items:
-            vector_ops.store_work_items(
-                work_items, pt["id"],
-                tenant_id, req.project_id, req.connector_id, req.data_source_id,
-                openai_client=openai_client
-            )
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        list(ex.map(_analyze_and_store_groupchat, processed_chat + processed_meeting))
-
-    _record_sync_history(tenant_id, req.project_id, req.connector_id, req.data_source_id,
-                         added, len(messages), "microsoft_teams", "group_chat")
-
-    if req.data_source_id:
-        _update_data_source_last_sync(req.data_source_id)
-
-    processed_threads = processed_meeting + processed_chat
-    audio_count = sum(1 for t in processed_threads if t.get("has_audio"))
-    video_count = sum(1 for t in processed_threads if t.get("has_video"))
-
-    return {
-        "added": added,
-        "total_fetched": len(messages),
-        "threads": len(processed_threads),
-        "meeting_threads": len(processed_meeting),
-        "chat_threads": len(processed_chat),
-        "audio_transcribed": audio_count,
-        "video_transcribed": video_count,
-    }
+@app.get("/api/sync/job/{job_id}")
+def get_sync_job_status(job_id: str, user=Depends(verify_token)):
+    job = local_store.get_job(job_id, user["tenantId"])
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.post("/api/devops/list-projects")

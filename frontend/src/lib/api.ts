@@ -96,6 +96,8 @@ export const teams = {
     fetchWithAuth(`${AI_API}/sync/channel`, { method: "POST", body: JSON.stringify(data) }),
   syncGroupChat: (data: { project_id: string; connector_id: string; data_source_id?: string; chat_id: string; chat_name: string }) =>
     fetchWithAuth(`${AI_API}/sync/group-chat`, { method: "POST", body: JSON.stringify(data) }),
+  syncJobStatus: (jobId: string) =>
+    fetchWithAuth(`${AI_API}/sync/job/${jobId}`),
 };
 
 export const devops = {
