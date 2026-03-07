@@ -1306,7 +1306,8 @@ def get_thread_transcript(thread_id: str, user=Depends(verify_token)):
             with conn.cursor() as cur:
                 cur.execute(
                     """SELECT clarified_content, raw_messages, started_by, started_at,
-                              last_message_at, segment_type, source_identifier, participants
+                              last_message_at, segment_type, source_identifier, participants,
+                              raw_transcript
                        FROM thread WHERE id = %s AND tenant_id = %s""",
                     (thread_id, tenant_id),
                 )
@@ -1321,6 +1322,7 @@ def get_thread_transcript(thread_id: str, user=Depends(verify_token)):
         segment_type = row[5] or ""
         source_id = row[6] or {}
         participants = row[7] or []
+        raw_transcript = row[8] or ""
 
         location = source_id.get("channel_name") or source_id.get("chat_name") or ""
         lines = [
@@ -1332,11 +1334,20 @@ def get_thread_transcript(thread_id: str, user=Depends(verify_token)):
             f"Start: {started_at}",
             f"End: {last_at}",
             "",
-            "--- CONVERSATION ---",
+            "--- TRANSLATED CONVERSATION (OpenAI) ---",
             "",
-            clarified or "(no clarified content available)",
+            clarified or "(no translated content available)",
+            "",
+            "--- ORIGINAL TRANSCRIPT (Sarvam AI) ---",
+            "",
+            raw_transcript or "(no original transcript available — will be populated on next sync)",
         ]
-        return {"transcript": "\n".join(lines), "thread_id": thread_id}
+        return {
+            "transcript": "\n".join(lines),
+            "thread_id": thread_id,
+            "raw_transcript": raw_transcript,
+            "clarified_content": clarified,
+        }
     except HTTPException:
         raise
     except Exception as e:

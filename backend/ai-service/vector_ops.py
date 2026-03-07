@@ -156,6 +156,7 @@ class VectorOps:
             has_video = thread.get("has_video", False)
             summary = thread.get("summary", "") or ""
             task_planning = thread.get("task_planning", "") or ""
+            raw_transcript = thread.get("raw_text", "") or ""
 
             def _dt(v):
                 if v is None:
@@ -180,12 +181,12 @@ class VectorOps:
                             """INSERT INTO thread
                                (id, tenant_id, project_id, connector_id, data_source_id,
                                 source_type, segment_type, source_identifier,
-                                raw_messages, clarified_content, embedding,
+                                raw_messages, clarified_content, raw_transcript, embedding,
                                 started_by, participants, message_count,
                                 has_audio, has_video, started_at, last_message_at,
                                 summary, task_planning)
                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb,
-                                       %s::jsonb, %s, %s::vector,
+                                       %s::jsonb, %s, %s, %s::vector,
                                        %s, %s::jsonb, %s,
                                        %s, %s, %s, %s,
                                        %s, %s)
@@ -194,7 +195,7 @@ class VectorOps:
                                 thread_id,
                                 tenant_id, project_id, connector_id, data_source_id,
                                 source_type, segment_type, source_id_json,
-                                json.dumps(serializable_messages), clarified, embedding_str,
+                                json.dumps(serializable_messages), clarified, raw_transcript, embedding_str,
                                 started_by, json.dumps(participants), message_count,
                                 has_audio, has_video, _dt(started_at), _dt(last_message_at),
                                 summary, task_planning,

@@ -60,6 +60,11 @@ interface Thread {
   data_source_id: string | null;
 }
 
+interface TranscriptData {
+  raw_transcript: string;
+  clarified_content: string;
+}
+
 interface WorkItem {
   id: string;
   title: string;
@@ -228,6 +233,9 @@ export default function ThreadsPage() {
   const [devopsDetailCache, setDevopsDetailCache] = useState<Record<string, DevOpsDetail | null>>({});
   const [loadingDevopsDetail, setLoadingDevopsDetail] = useState<Record<string, boolean>>({});
   const [regeneratingPlan, setRegeneratingPlan] = useState(false);
+  const [transcriptExpanded, setTranscriptExpanded] = useState(false);
+  const [transcriptData, setTranscriptData] = useState<TranscriptData | null>(null);
+  const [loadingTranscriptView, setLoadingTranscriptView] = useState(false);
 
   const [filterDataSource, setFilterDataSource] = useState("all");
   const [filterSegmentType, setFilterSegmentType] = useState("all");
@@ -291,6 +299,8 @@ export default function ThreadsPage() {
     setExpandedWorkItem(null);
     setDevopsDetailCache({});
     setLoadingDevopsDetail({});
+    setTranscriptExpanded(false);
+    setTranscriptData(null);
 
     if (!thread.viewed) {
       try {
@@ -374,6 +384,29 @@ export default function ThreadsPage() {
       toast.error("Failed to download transcript");
     } finally {
       setDownloadingTranscript(false);
+    }
+  }
+
+  async function handleToggleTranscriptView() {
+    if (!selectedThread) return;
+    if (transcriptExpanded) {
+      setTranscriptExpanded(false);
+      return;
+    }
+    setTranscriptExpanded(true);
+    if (transcriptData) return;
+    setLoadingTranscriptView(true);
+    try {
+      const data = await threadsApi.getTranscript(selectedThread.id);
+      setTranscriptData({
+        raw_transcript: data.raw_transcript || "",
+        clarified_content: data.clarified_content || "",
+      });
+    } catch {
+      toast.error("Failed to load transcripts");
+      setTranscriptExpanded(false);
+    } finally {
+      setLoadingTranscriptView(false);
     }
   }
 
@@ -760,6 +793,54 @@ export default function ThreadsPage() {
                     </p>
                   )}
                 </div>
+
+                {(selectedThread.has_audio || selectedThread.has_video) && (
+                  <>
+                    <Separator />
+                    <div>
+                      <button
+                        className="w-full flex items-center justify-between text-base font-semibold py-1 hover:text-primary transition-colors"
+                        onClick={handleToggleTranscriptView}
+                      >
+                        <span className="flex items-center gap-2">
+                          {selectedThread.has_video ? <Video className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                          Transcripts
+                        </span>
+                        {loadingTranscriptView
+                          ? <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                          : transcriptExpanded
+                            ? <ChevronUp className="h-4 w-4 text-muted-foreground" />
+                            : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+                      </button>
+                      {transcriptExpanded && !loadingTranscriptView && transcriptData && (
+                        <div className="mt-3 space-y-4">
+                          <div>
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-700 border border-orange-200">
+                                <Mic className="h-3 w-3" /> Original (Sarvam AI)
+                              </span>
+                              <span className="text-xs text-muted-foreground">Raw transcription in original language</span>
+                            </div>
+                            <pre className="text-xs text-muted-foreground bg-muted/40 rounded-lg p-3 whitespace-pre-wrap leading-relaxed border max-h-64 overflow-y-auto">
+                              {transcriptData.raw_transcript || "(no original transcript — will be populated on next sync)"}
+                            </pre>
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 mb-2">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200">
+                                <RefreshCw className="h-3 w-3" /> Translated (OpenAI)
+                              </span>
+                              <span className="text-xs text-muted-foreground">Rewritten in clear English</span>
+                            </div>
+                            <pre className="text-xs text-muted-foreground bg-muted/40 rounded-lg p-3 whitespace-pre-wrap leading-relaxed border max-h-64 overflow-y-auto">
+                              {transcriptData.clarified_content || "(no translated content available)"}
+                            </pre>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
 
                 <Separator />
 
