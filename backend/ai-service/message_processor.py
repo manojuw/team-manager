@@ -35,6 +35,33 @@ CLARIFY_SYSTEM_PROMPT = (
     "- Do not add commentary, headers, or extra text."
 )
 
+MEETING_PLAN_SYSTEM_PROMPT = (
+    "You are a senior product analyst. You receive a translated meeting transcript and produce "
+    "a comprehensive, structured development brief that a developer team can act on immediately.\n\n"
+    "Output a JSON object with exactly two fields:\n"
+    "  \"summary\": 3-5 sentence overview — what the meeting was about, who the stakeholders are, "
+    "and what the overall goal is.\n"
+    "  \"task_planning\": Rich Markdown using the structure below. Use real content from the transcript; "
+    "never invent details. Omit any section that has no content.\n\n"
+    "Markdown structure for task_planning:\n"
+    "# Meeting Summary\n"
+    "One paragraph of context and goals.\n\n"
+    "# Key Decisions\n"
+    "Numbered list. Each item: decision made + brief rationale or example from the transcript.\n\n"
+    "# [Feature / Dashboard / Area Name] Tasks\n"
+    "Repeat this top-level section for each distinct feature or dashboard area discussed.\n"
+    "Under each section use sub-headings:\n"
+    "## Remove\n- bullet list of things to remove\n"
+    "## Add / Change\n- bullet list of additions and changes\n"
+    "Use Markdown tables where a before/after or column comparison is clearer.\n"
+    "Use fenced code blocks for flow diagrams (e.g. Employee → Manager → Finance).\n\n"
+    "# Technical Tasks\n"
+    "Backend, API, permissions, data-model, and architecture items as a checklist.\n\n"
+    "# Deliverables\n"
+    "Numbered flat list of every actionable item from the meeting, ordered by priority.\n\n"
+    "Return only valid JSON. Escape all quotes and newlines inside string values."
+)
+
 _REFUSAL_PHRASES = (
     "i'm sorry", "i am sorry", "i can't assist", "i cannot assist",
     "i'm unable", "i am unable", "i cannot help", "i can't help",
@@ -487,39 +514,49 @@ class MessageProcessor:
             logger.error(f"[Processor] Embedding failed: {e}")
             return []
 
-    def _generate_thread_plan(self, clarified_content: str) -> dict:
+    def _generate_thread_plan(self, clarified_content: str, is_meeting: bool = False) -> dict:
         if not clarified_content or len(clarified_content.strip()) < 30:
             return {"summary": "", "task_planning": ""}
         try:
+            if is_meeting:
+                system_prompt = MEETING_PLAN_SYSTEM_PROMPT
+                context = clarified_content[:24000]
+                max_tok = 4096
+                user_content = (
+                    f"Meeting transcript:\n{context}\n\n"
+                    "Produce the JSON development brief as instructed. "
+                    "Return only valid JSON: {\"summary\": \"...\", \"task_planning\": \"...\"}"
+                )
+                logger.info(f"[Processor] Generating MEETING plan from {len(context)} chars of transcript")
+            else:
+                system_prompt = (
+                    "You analyze translated Teams conversation threads and produce a structured summary and task plan. "
+                    "Be concise and accurate. Respond with JSON only."
+                )
+                context = clarified_content[:3000]
+                max_tok = 1000
+                user_content = (
+                    f"Conversation:\n{context}\n\n"
+                    "Produce JSON with two fields:\n"
+                    "1. \"summary\": 2-3 sentences describing what this conversation is about and its main outcome.\n"
+                    "2. \"task_planning\": A Markdown-formatted plan with these sections (omit any section that has no content):\n"
+                    "   ## Action Items\n"
+                    "   - [ ] **Person** — what needs to be done\n"
+                    "   ## Decisions Made\n"
+                    "   - decision\n"
+                    "   ## Open Questions\n"
+                    "   - question\n\n"
+                    "Return JSON only: {\"summary\": \"...\", \"task_planning\": \"...\"}"
+                )
+
             response = self.openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You analyze translated Teams conversation threads and produce a structured summary and task plan. "
-                            "Be concise and accurate. Respond with JSON only."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Conversation:\n{clarified_content[:3000]}\n\n"
-                            "Produce JSON with two fields:\n"
-                            "1. \"summary\": 2-3 sentences describing what this conversation is about and its main outcome.\n"
-                            "2. \"task_planning\": A Markdown-formatted plan with these sections (omit any section that has no content):\n"
-                            "   ## Action Items\n"
-                            "   - [ ] **Person** — what needs to be done\n"
-                            "   ## Decisions Made\n"
-                            "   - decision\n"
-                            "   ## Open Questions\n"
-                            "   - question\n\n"
-                            "Return JSON only: {\"summary\": \"...\", \"task_planning\": \"...\"}"
-                        ),
-                    },
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
                 ],
                 temperature=0,
-                max_tokens=1000,
+                max_tokens=max_tok,
             )
             raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
@@ -562,9 +599,10 @@ class MessageProcessor:
             logger.info("[Processor] Dropping meeting thread — no transcript could be extracted")
             return None
 
+        is_meeting = bool(thread.get("is_meeting"))
         clarified = self.clarify_thread(raw_text[:32000])
         embedding = self.embed_text(clarified) if clarified else []
-        plan = self._generate_thread_plan(clarified) if clarified else {"summary": "", "task_planning": ""}
+        plan = self._generate_thread_plan(clarified, is_meeting=is_meeting) if clarified else {"summary": "", "task_planning": ""}
 
         return {
             **thread,
