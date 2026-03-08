@@ -180,18 +180,18 @@ class AudioProcessor:
             raw_json_str = json.dumps(data, ensure_ascii=False, indent=2)
 
             diarized = data.get("diarized_transcript") or {}
-            segments = diarized.get("segments") or []
+            entries = diarized.get("entries") or []
 
-            if segments:
+            if entries:
                 lines = []
-                for seg in segments:
-                    speaker = seg.get("speaker", "SPEAKER")
-                    start = seg.get("start", 0)
-                    end = seg.get("end", 0)
-                    text = seg.get("text", "").strip()
-                    lines.append(f"[{speaker} {start:.1f}s-{end:.1f}s]: {text}")
+                for entry in entries:
+                    speaker_id = entry.get("speaker_id", "?")
+                    start = entry.get("start_time_seconds", 0)
+                    end = entry.get("end_time_seconds", 0)
+                    text = entry.get("transcript", "").strip()
+                    lines.append(f"[Speaker {speaker_id} {start:.1f}s-{end:.1f}s]: {text}")
                 formatted = "\n".join(lines)
-                logger.info(f"[Audio] Diarized transcript: {len(segments)} segments, {len(formatted)} chars")
+                logger.info(f"[Audio] Diarized transcript: {len(entries)} entries, {len(formatted)} chars")
             else:
                 formatted = data.get("transcript", "")
                 logger.info(f"[Audio] Plain transcript: {len(formatted)} chars (no diarization data)")
