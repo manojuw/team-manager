@@ -419,31 +419,61 @@ class MessageProcessor:
 
         return "\n".join(parts)
 
-    def clarify_thread(self, raw_text: str) -> str:
-        if not raw_text.strip():
-            return raw_text
+    _CLARIFY_CHUNK_SIZE = 4000
+
+    def _clarify_chunk(self, text: str) -> str:
         try:
             response = self.openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": CLARIFY_SYSTEM_PROMPT},
-                    {"role": "user", "content": raw_text},
+                    {"role": "user", "content": text},
                 ],
                 temperature=0.2,
-                max_tokens=4096,
+                max_tokens=16384,
             )
             clarified = response.choices[0].message.content.strip()
             if any(phrase in clarified.lower() for phrase in _REFUSAL_PHRASES):
-                logger.warning(
-                    f"[Processor] OpenAI refused clarification (response: {clarified[:80]}), "
-                    f"falling back to raw text ({len(raw_text)} chars)"
-                )
-                return raw_text
-            logger.info(f"[Processor] Clarified thread: {len(raw_text)} chars -> {len(clarified)} chars")
+                logger.warning(f"[Processor] OpenAI refused chunk ({len(text)} chars): {clarified[:80]}")
+                return text
             return clarified
         except Exception as e:
-            logger.error(f"[Processor] Clarification failed: {e}")
+            logger.error(f"[Processor] Chunk clarification failed: {e}")
+            return text
+
+    def clarify_thread(self, raw_text: str) -> str:
+        if not raw_text.strip():
             return raw_text
+
+        if len(raw_text) <= self._CLARIFY_CHUNK_SIZE:
+            result = self._clarify_chunk(raw_text)
+            logger.info(f"[Processor] Clarified thread: {len(raw_text)} chars -> {len(result)} chars")
+            return result
+
+        lines = raw_text.split("\n")
+        chunks = []
+        current_lines = []
+        current_len = 0
+        for line in lines:
+            line_len = len(line) + 1
+            if current_len + line_len > self._CLARIFY_CHUNK_SIZE and current_lines:
+                chunks.append("\n".join(current_lines))
+                current_lines = [line]
+                current_len = line_len
+            else:
+                current_lines.append(line)
+                current_len += line_len
+        if current_lines:
+            chunks.append("\n".join(current_lines))
+
+        logger.info(f"[Processor] Long text ({len(raw_text)} chars): splitting into {len(chunks)} chunks")
+        translated = []
+        for i, chunk in enumerate(chunks, 1):
+            result = self._clarify_chunk(chunk)
+            logger.info(f"[Processor] Clarified chunk {i}/{len(chunks)}: {len(chunk)} -> {len(result)} chars")
+            translated.append(result)
+
+        return "\n".join(translated)
 
     def embed_text(self, text: str) -> list:
         try:
