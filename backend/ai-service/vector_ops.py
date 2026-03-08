@@ -190,7 +190,9 @@ class VectorOps:
                                        %s, %s::jsonb, %s,
                                        %s, %s, %s, %s,
                                        %s, %s)
-                               ON CONFLICT (id) DO NOTHING""",
+                               ON CONFLICT (id) DO UPDATE SET
+                                 raw_transcript = EXCLUDED.raw_transcript
+                               WHERE thread.raw_transcript IS NULL OR thread.raw_transcript = ''""",
                             (
                                 thread_id,
                                 tenant_id, project_id, connector_id, data_source_id,
@@ -204,7 +206,7 @@ class VectorOps:
                         if cur.rowcount > 0:
                             added += 1
                         else:
-                            logger.warning(f"[VectorOps] Thread {thread_id} already exists (ON CONFLICT DO NOTHING)")
+                            logger.info(f"[VectorOps] Thread {thread_id} already exists, raw_transcript backfill may have applied")
                     conn.commit()
             except Exception as e:
                 logger.error(f"[VectorOps] Failed to insert thread {thread_id}: {e}", exc_info=True)

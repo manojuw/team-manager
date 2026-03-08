@@ -3,10 +3,12 @@ import io
 import hashlib
 import logging
 import os
+import re
 import threading
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime as _datetime
 import local_store
 
 logger = logging.getLogger(__name__)
@@ -14,6 +16,10 @@ logger = logging.getLogger(__name__)
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
 SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
 CHUNK_MS = 30_000
+
+AUDIO_DEBUG_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', '..', 'attached_assets', 'audio_debug'
+)
 
 
 class _RateLimiter:
@@ -56,6 +62,26 @@ VIDEO_EXTENSIONS = {".mp4", ".mpeg", ".webm", ".mov", ".avi", ".mkv", ".3gp"}
 
 
 class AudioProcessor:
+    def _save_debug_bytes(self, filename: str, data: bytes):
+        try:
+            os.makedirs(AUDIO_DEBUG_DIR, exist_ok=True)
+            path = os.path.join(AUDIO_DEBUG_DIR, filename)
+            with open(path, "wb") as f:
+                f.write(data)
+            logger.info(f"[AudioDebug] Saved {len(data)} bytes → {path}")
+        except Exception as e:
+            logger.warning(f"[AudioDebug] Could not save {filename}: {e}")
+
+    def _save_debug_text(self, filename: str, text: str):
+        try:
+            os.makedirs(AUDIO_DEBUG_DIR, exist_ok=True)
+            path = os.path.join(AUDIO_DEBUG_DIR, filename)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            logger.info(f"[AudioDebug] Saved text ({len(text)} chars) → {path}")
+        except Exception as e:
+            logger.warning(f"[AudioDebug] Could not save {filename}: {e}")
+
     def is_audio_attachment(self, att: dict) -> bool:
         content_type = (att.get("content_type") or att.get("contentType") or "").lower().split(";")[0].strip()
         name = (att.get("name") or "").lower()
@@ -157,13 +183,22 @@ class AudioProcessor:
             logger.error(f"[Audio] Chunk request failed for {filename}: {e}")
             return ""
 
-    def _transcribe_wav_bytes(self, wav_bytes: bytes, base: str, cache_key: str = "") -> str:
+    def _transcribe_wav_bytes(self, wav_bytes: bytes, base: str, cache_key: str = "", debug_key: str = "") -> str:
         from pydub import AudioSegment
         audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
         duration_s = len(audio) / 1000.0
 
         if duration_s <= 25:
-            return self._post_chunk(wav_bytes, f"{base}.wav")
+            if debug_key:
+                self._save_debug_bytes(f"{debug_key}_chunk01.wav", wav_bytes)
+            result = self._post_chunk(wav_bytes, f"{base}.wav")
+            if debug_key:
+                self._save_debug_text(f"{debug_key}_chunk01.txt", result or "(empty)")
+                self._save_debug_text(
+                    f"{debug_key}_full_transcript.txt",
+                    f"=== Chunk 1 ===\n{result or '(empty)'}\n\n=== FULL MERGED TRANSCRIPT ===\n{result or '(empty)'}"
+                )
+            return result
 
         logger.info(f"[Audio] Audio is {duration_s:.1f}s — splitting into 25s chunks")
         chunks = [audio[i:i + CHUNK_MS] for i in range(0, len(audio), CHUNK_MS)]
@@ -171,17 +206,27 @@ class AudioProcessor:
 
         def _export_and_send(args):
             idx, chunk = args
-            if cache_key:
-                cached = local_store.cache_get_chunk(cache_key, idx)
-                if cached is not None:
-                    logger.info(f"[Audio] Chunk {idx}/{total} loaded from cache")
-                    return cached
+
             chunk_io = io.BytesIO()
             chunk.export(chunk_io, format="wav")
             chunk_bytes = chunk_io.getvalue()
             chunk_s = len(chunk) / 1000.0
+
+            if debug_key:
+                self._save_debug_bytes(f"{debug_key}_chunk{idx:02d}.wav", chunk_bytes)
+
+            if cache_key:
+                cached = local_store.cache_get_chunk(cache_key, idx)
+                if cached is not None:
+                    logger.info(f"[Audio] Chunk {idx}/{total} loaded from cache")
+                    if debug_key:
+                        self._save_debug_text(f"{debug_key}_chunk{idx:02d}.txt", cached or "(empty)")
+                    return cached
+
             logger.info(f"[Audio] Transcribing chunk {idx}/{total} ({chunk_s:.1f}s, {len(chunk_bytes)} bytes)")
             result = self._post_chunk(chunk_bytes, f"{base}_chunk{idx}.wav")
+            if debug_key:
+                self._save_debug_text(f"{debug_key}_chunk{idx:02d}.txt", result or "(empty)")
             if result and cache_key:
                 local_store.cache_set_chunk(cache_key, idx, result)
             return result
@@ -192,6 +237,15 @@ class AudioProcessor:
         parts = [r for r in results if r]
         transcript = " ".join(parts)
         logger.info(f"[Audio] Merged {total} chunks → {len(transcript)} chars total")
+
+        if debug_key:
+            chunk_sections = []
+            for i, r in enumerate(results, 1):
+                chunk_sections.append(f"=== Chunk {i} ===\n{r or '(empty)'}")
+            full_text = "\n\n".join(chunk_sections)
+            full_text += f"\n\n=== FULL MERGED TRANSCRIPT ===\n{transcript}"
+            self._save_debug_text(f"{debug_key}_full_transcript.txt", full_text)
+
         return transcript
 
     def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav", cache_key: str = "") -> str:
@@ -202,6 +256,12 @@ class AudioProcessor:
         detected_ext, _ = self.detect_audio_format(audio_bytes)
         base = filename.rsplit(".", 1)[0] if "." in filename else filename
 
+        safe_base = re.sub(r'[^\w-]', '_', base)[:40]
+        debug_key = cache_key[:8] if cache_key else _datetime.now().strftime("%Y%m%d_%H%M%S")
+        full_debug_key = f"{safe_base}_{debug_key}"
+
+        self._save_debug_bytes(f"{full_debug_key}_full.{detected_ext}", audio_bytes)
+
         try:
             logger.info(f"[Audio] Converting {base}.{detected_ext} to 16kHz mono WAV")
             wav_bytes = self.to_stt_wav(audio_bytes, f"{base}.{detected_ext}")
@@ -209,4 +269,4 @@ class AudioProcessor:
             logger.warning(f"[Audio] WAV conversion failed for {base}.{detected_ext}: {e}")
             return ""
 
-        return self._transcribe_wav_bytes(wav_bytes, base, cache_key=cache_key)
+        return self._transcribe_wav_bytes(wav_bytes, base, cache_key=cache_key, debug_key=full_debug_key)
