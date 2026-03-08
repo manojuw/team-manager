@@ -1,49 +1,20 @@
-import collections
 import io
-import hashlib
+import json
 import logging
 import os
 import re
-import threading
-import time
-import requests
-from concurrent.futures import ThreadPoolExecutor
+import tempfile
 from datetime import datetime as _datetime
+from sarvamai import SarvamAI
 import local_store
 
 logger = logging.getLogger(__name__)
 
 SARVAM_API_KEY = os.environ.get("SARVAM_API_KEY", "")
-SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
-CHUNK_MS = 30_000
 
 AUDIO_DEBUG_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', '..', 'attached_assets', 'audio_debug'
 )
-
-
-class _RateLimiter:
-    """Sliding-window rate limiter: at most max_calls per period seconds."""
-    def __init__(self, max_calls: int, period: float):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls: collections.deque = collections.deque()
-        self.lock = threading.Lock()
-
-    def acquire(self):
-        while True:
-            with self.lock:
-                now = time.monotonic()
-                while self.calls and self.calls[0] <= now - self.period:
-                    self.calls.popleft()
-                if len(self.calls) < self.max_calls:
-                    self.calls.append(now)
-                    return
-                wait = self.period - (now - self.calls[0]) + 0.05
-            time.sleep(wait)
-
-
-_sarvam_limiter = _RateLimiter(max_calls=55, period=60)
 
 AUDIO_MIME_TYPES = {
     "audio/amr", "audio/mpeg", "audio/mp3", "audio/ogg",
@@ -144,109 +115,102 @@ class AudioProcessor:
             logger.error(f"[Audio] video_to_mp3 failed for {filename}: {e}")
             raise
 
-    def to_stt_wav(self, audio_bytes: bytes, filename: str = "audio.m4a") -> bytes:
-        from pydub import AudioSegment
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "mp4"
-        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=ext)
-        audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-        wav_io = io.BytesIO()
-        audio.export(wav_io, format="wav")
-        wav_io.seek(0)
-        result = wav_io.getvalue()
-        logger.info(f"[Audio] Converted {filename} to 16kHz mono WAV ({len(audio_bytes)} -> {len(result)} bytes)")
-        return result
-
-    def _post_chunk(self, wav_bytes: bytes, filename: str) -> str:
-        _sarvam_limiter.acquire()
-        response = None
+    def _run_batch_job(self, audio_bytes: bytes, ext: str, debug_key: str) -> str:
+        tmp_dir = tempfile.mkdtemp(prefix="sarvam_")
         try:
-            response = requests.post(
-                SARVAM_STT_URL,
-                headers={"api-subscription-key": SARVAM_API_KEY},
-                files={"file": (filename, io.BytesIO(wav_bytes), "audio/wav")},
-                data={
-                    "model": "saarika:v2.5",
-                    "language_code": "unknown",
-                    "with_timestamps": "false",
-                },
-                timeout=60,
+            safe_name = "audio"
+            tmp_audio_path = os.path.join(tmp_dir, f"{safe_name}.{ext}")
+            tmp_output_dir = os.path.join(tmp_dir, "output")
+            os.makedirs(tmp_output_dir, exist_ok=True)
+
+            with open(tmp_audio_path, "wb") as f:
+                f.write(audio_bytes)
+
+            logger.info(f"[Audio] Starting Sarvam batch job for {safe_name}.{ext} ({len(audio_bytes)} bytes)")
+
+            client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
+
+            job = client.speech_to_text_job.create_job(
+                model="saaras:v3",
+                mode="transcribe",
+                language_code="unknown",
+                with_diarization=True,
+                num_speakers=2,
             )
-            response.raise_for_status()
-            transcript = response.json().get("transcript", "")
-            logger.info(f"[Audio] Chunk {filename}: {len(transcript)} chars")
-            return transcript
-        except requests.exceptions.HTTPError:
-            body = response.text if response is not None else "(no response)"
-            logger.error(f"[Audio] SarvamAI {response.status_code if response is not None else '?'}: {body}")
-            return ""
+            logger.info(f"[Audio] Batch job created: {job.job_id}")
+
+            job.upload_files(file_paths=[tmp_audio_path])
+            logger.info(f"[Audio] File uploaded to job {job.job_id}")
+
+            job.start()
+            logger.info(f"[Audio] Batch job {job.job_id} started, waiting for completion...")
+
+            start_ts = _datetime.now()
+            job.wait_until_complete(poll_interval=5, timeout=1800)
+            elapsed = (_datetime.now() - start_ts).total_seconds()
+            logger.info(f"[Audio] Batch job {job.job_id} completed in {elapsed:.1f}s")
+
+            file_results = job.get_file_results()
+            successful = file_results.get("successful", [])
+            failed = file_results.get("failed", [])
+            logger.info(f"[Audio] Results — successful: {len(successful)}, failed: {len(failed)}")
+            for f in failed:
+                logger.error(f"[Audio] Failed file: {f.get('file_name')} — {f.get('error_message')}")
+
+            if not successful:
+                logger.error(f"[Audio] Batch job {job.job_id} had no successful files")
+                return ""
+
+            job.download_outputs(output_dir=tmp_output_dir)
+
+            output_json_path = os.path.join(tmp_output_dir, f"{safe_name}.json")
+            if not os.path.exists(output_json_path):
+                all_files = os.listdir(tmp_output_dir)
+                json_files = [fn for fn in all_files if fn.endswith(".json")]
+                if json_files:
+                    output_json_path = os.path.join(tmp_output_dir, json_files[0])
+                    logger.info(f"[Audio] Using output file: {json_files[0]}")
+                else:
+                    logger.error(f"[Audio] No JSON output found in {tmp_output_dir}. Files: {all_files}")
+                    return ""
+
+            with open(output_json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            raw_json_str = json.dumps(data, ensure_ascii=False, indent=2)
+
+            diarized = data.get("diarized_transcript") or {}
+            segments = diarized.get("segments") or []
+
+            if segments:
+                lines = []
+                for seg in segments:
+                    speaker = seg.get("speaker", "SPEAKER")
+                    start = seg.get("start", 0)
+                    end = seg.get("end", 0)
+                    text = seg.get("text", "").strip()
+                    lines.append(f"[{speaker} {start:.1f}s-{end:.1f}s]: {text}")
+                formatted = "\n".join(lines)
+                logger.info(f"[Audio] Diarized transcript: {len(segments)} segments, {len(formatted)} chars")
+            else:
+                formatted = data.get("transcript", "")
+                logger.info(f"[Audio] Plain transcript: {len(formatted)} chars (no diarization data)")
+
+            if debug_key:
+                debug_content = f"=== RAW JSON RESPONSE ===\n{raw_json_str}\n\n=== FORMATTED TRANSCRIPT ===\n{formatted}"
+                self._save_debug_text(f"{debug_key}_full_transcript.txt", debug_content)
+
+            return formatted
+
         except Exception as e:
-            logger.error(f"[Audio] Chunk request failed for {filename}: {e}")
+            logger.error(f"[Audio] Batch job failed: {e}", exc_info=True)
             return ""
-
-    def _transcribe_wav_bytes(self, wav_bytes: bytes, base: str, cache_key: str = "", debug_key: str = "") -> str:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
-        duration_s = len(audio) / 1000.0
-
-        if duration_s <= 25:
-            if debug_key:
-                self._save_debug_bytes(f"{debug_key}_chunk01.wav", wav_bytes)
-            result = self._post_chunk(wav_bytes, f"{base}.wav")
-            if debug_key:
-                self._save_debug_text(f"{debug_key}_chunk01.txt", result or "(empty)")
-                self._save_debug_text(
-                    f"{debug_key}_full_transcript.txt",
-                    f"=== Chunk 1 ===\n{result or '(empty)'}\n\n=== FULL MERGED TRANSCRIPT ===\n{result or '(empty)'}"
-                )
-            return result
-
-        logger.info(f"[Audio] Audio is {duration_s:.1f}s — splitting into 25s chunks")
-        chunks = [audio[i:i + CHUNK_MS] for i in range(0, len(audio), CHUNK_MS)]
-        total = len(chunks)
-
-        def _export_and_send(args):
-            idx, chunk = args
-
-            chunk_io = io.BytesIO()
-            chunk.export(chunk_io, format="wav")
-            chunk_bytes = chunk_io.getvalue()
-            chunk_s = len(chunk) / 1000.0
-
-            if debug_key:
-                self._save_debug_bytes(f"{debug_key}_chunk{idx:02d}.wav", chunk_bytes)
-
-            if cache_key:
-                cached = local_store.cache_get_chunk(cache_key, idx)
-                if cached is not None:
-                    logger.info(f"[Audio] Chunk {idx}/{total} loaded from cache")
-                    if debug_key:
-                        self._save_debug_text(f"{debug_key}_chunk{idx:02d}.txt", cached or "(empty)")
-                    return cached
-
-            logger.info(f"[Audio] Transcribing chunk {idx}/{total} ({chunk_s:.1f}s, {len(chunk_bytes)} bytes)")
-            result = self._post_chunk(chunk_bytes, f"{base}_chunk{idx}.wav")
-            if debug_key:
-                self._save_debug_text(f"{debug_key}_chunk{idx:02d}.txt", result or "(empty)")
-            if result and cache_key:
-                local_store.cache_set_chunk(cache_key, idx, result)
-            return result
-
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            results = list(executor.map(_export_and_send, enumerate(chunks, 1)))
-
-        parts = [r for r in results if r]
-        transcript = " ".join(parts)
-        logger.info(f"[Audio] Merged {total} chunks → {len(transcript)} chars total")
-
-        if debug_key:
-            chunk_sections = []
-            for i, r in enumerate(results, 1):
-                chunk_sections.append(f"=== Chunk {i} ===\n{r or '(empty)'}")
-            full_text = "\n\n".join(chunk_sections)
-            full_text += f"\n\n=== FULL MERGED TRANSCRIPT ===\n{transcript}"
-            self._save_debug_text(f"{debug_key}_full_transcript.txt", full_text)
-
-        return transcript
+        finally:
+            import shutil
+            try:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     def transcribe_audio(self, audio_bytes: bytes, filename: str = "audio.wav", cache_key: str = "") -> str:
         if not SARVAM_API_KEY:
@@ -262,11 +226,15 @@ class AudioProcessor:
 
         self._save_debug_bytes(f"{full_debug_key}_full.{detected_ext}", audio_bytes)
 
-        try:
-            logger.info(f"[Audio] Converting {base}.{detected_ext} to 16kHz mono WAV")
-            wav_bytes = self.to_stt_wav(audio_bytes, f"{base}.{detected_ext}")
-        except Exception as e:
-            logger.warning(f"[Audio] WAV conversion failed for {base}.{detected_ext}: {e}")
-            return ""
+        if cache_key:
+            cached = local_store.cache_get_chunk(cache_key, 0)
+            if cached is not None:
+                logger.info(f"[Audio] Full transcript loaded from cache for key {cache_key[:8]}")
+                return cached
 
-        return self._transcribe_wav_bytes(wav_bytes, base, cache_key=cache_key, debug_key=full_debug_key)
+        result = self._run_batch_job(audio_bytes, detected_ext, full_debug_key)
+
+        if result and cache_key:
+            local_store.cache_set_chunk(cache_key, 0, result)
+
+        return result
