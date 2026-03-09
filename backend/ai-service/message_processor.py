@@ -17,9 +17,11 @@ _embeddings_client = None
 def _get_embeddings_client():
     global _embeddings_client
     if _embeddings_client is None:
-        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("AI_INTEGRATIONS_OPENAI_API_KEY")
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get(
+            "AI_INTEGRATIONS_OPENAI_API_KEY")
         _embeddings_client = _OpenAI(api_key=api_key)
     return _embeddings_client
+
 
 CLARIFY_SYSTEM_PROMPT = (
     "You are a professional translator and transcriber. "
@@ -32,8 +34,7 @@ CLARIFY_SYSTEM_PROMPT = (
     "- Translate casual/slang terms to their proper English meaning.\n"
     "- If audio or video was transcribed, include that content as part of the conversation.\n"
     "- Output format: 'SpeakerName: <their message>' on each line.\n"
-    "- Do not add commentary, headers, or extra text."
-)
+    "- Do not add commentary, headers, or extra text.")
 
 MEETING_PLAN_SYSTEM_PROMPT = (
     "You are a senior product analyst. You receive a translated meeting transcript and produce "
@@ -63,13 +64,21 @@ MEETING_PLAN_SYSTEM_PROMPT = (
 )
 
 _REFUSAL_PHRASES = (
-    "i'm sorry", "i am sorry", "i can't assist", "i cannot assist",
-    "i'm unable", "i am unable", "i cannot help", "i can't help",
-    "i'm not able", "i am not able",
+    "i'm sorry",
+    "i am sorry",
+    "i can't assist",
+    "i cannot assist",
+    "i'm unable",
+    "i am unable",
+    "i cannot help",
+    "i can't help",
+    "i'm not able",
+    "i am not able",
 )
 
 
 class MessageProcessor:
+
     def __init__(self, openai_client, audio_processor=None, teams_client=None):
         self.openai = openai_client
         self.audio_processor = audio_processor
@@ -94,7 +103,8 @@ class MessageProcessor:
             url = node.get("url", "")
             if url:
                 urls.append(url)
-            for key in ("actions", "body", "items", "columns", "facts", "rows", "cells"):
+            for key in ("actions", "body", "items", "columns", "facts", "rows",
+                        "cells"):
                 _walk(node.get(key))
 
         _walk(card_json)
@@ -113,33 +123,48 @@ class MessageProcessor:
         )
         if any(p in url_lower for p in recording_patterns):
             return True
-        if any(url_lower.endswith(ext) for ext in (".mp4", ".m4v", ".webm", ".mov")):
+        if any(
+                url_lower.endswith(ext)
+                for ext in (".mp4", ".m4v", ".webm", ".mov")):
             return True
         return False
 
-    def _try_download_and_transcribe_recording(self, url: str, label: str) -> Optional[str]:
+    def _try_download_and_transcribe_recording(self, url: str,
+                                               label: str) -> Optional[str]:
         if not self.audio_processor or not self.teams_client:
             return None
         try:
-            logger.info(f"[Processor] Trying recording download: {label} ({url[:80]})")
+            logger.info(
+                f"[Processor] Trying recording download: {label} ({url[:80]})")
             if url.startswith("https://graph.microsoft.com"):
                 video_bytes = self.teams_client._get_raw(url)
             else:
-                video_bytes = self.teams_client.get_recording_from_sharing_url(url)
+                video_bytes = self.teams_client.get_recording_from_sharing_url(
+                    url)
             if not video_bytes:
-                logger.warning(f"[Processor] No bytes from recording URL: {label}")
+                logger.warning(
+                    f"[Processor] No bytes from recording URL: {label}")
                 return None
-            logger.info(f"[Processor] Downloaded {len(video_bytes)} bytes for {label}, converting to MP3")
-            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, "recording.mp4")
+            logger.info(
+                f"[Processor] Downloaded {len(video_bytes)} bytes for {label}, converting to MP3"
+            )
+            mp3_bytes = self.audio_processor.video_to_mp3(
+                video_bytes, "recording.mp4")
             cache_key = hashlib.md5(url.encode()).hexdigest()
-            transcript = self.audio_processor.transcribe_audio(mp3_bytes, "recording.mp3", cache_key=cache_key)
+            transcript = self.audio_processor.transcribe_audio(
+                mp3_bytes, "recording.mp3", cache_key=cache_key)
             if transcript:
-                logger.info(f"[Processor] Recording transcribed: {len(transcript)} chars")
+                logger.info(
+                    f"[Processor] Recording transcribed: {len(transcript)} chars"
+                )
                 return transcript
-            logger.warning(f"[Processor] Sarvam AI returned empty transcript for: {label}")
+            logger.warning(
+                f"[Processor] Sarvam AI returned empty transcript for: {label}"
+            )
             return None
         except Exception as e:
-            logger.warning(f"[Processor] Recording transcription failed for {label}: {e}")
+            logger.warning(
+                f"[Processor] Recording transcription failed for {label}: {e}")
             return None
 
     def _collect_meeting_content(self, thread: dict) -> str:
@@ -147,17 +172,20 @@ class MessageProcessor:
         messages = thread.get("messages", [])
         parts = []
 
-        logger.info(f"[Processor] Meeting thread has {len(messages)} message(s):")
+        logger.info(
+            f"[Processor] Meeting thread has {len(messages)} message(s):")
         for i, msg in enumerate(messages):
             msg_type = msg.get("message_type", "message")
             event_detail = msg.get("event_detail", {})
-            event_type = event_detail.get("@odata.type", "") if event_detail else ""
+            event_type = event_detail.get("@odata.type",
+                                          "") if event_detail else ""
             atts = msg.get("attachments", [])
             att_summary = ", ".join(
                 f"{a.get('name') or '?'}[{a.get('content_type') or '?'}|url={bool(a.get('content_url'))}|card={bool(a.get('card_content'))}]"
-                for a in atts
-            ) if atts else "none"
-            logger.info(f"[Processor]   msg[{i}] type={msg_type} event={event_type or 'N/A'} attachments=[{att_summary}]")
+                for a in atts) if atts else "none"
+            logger.info(
+                f"[Processor]   msg[{i}] type={msg_type} event={event_type or 'N/A'} attachments=[{att_summary}]"
+            )
 
         recording_transcribed = False
 
@@ -176,14 +204,16 @@ class MessageProcessor:
                 rec_url = event_detail.get("callRecordingUrl") or ""
                 if not rec_url:
                     continue
-                display_name = event_detail.get("callRecordingDisplayName") or "Recording"
+                display_name = event_detail.get(
+                    "callRecordingDisplayName") or "Recording"
                 logger.info(
                     f"[Processor] Found callRecordingUrl in event detail: {display_name} "
-                    f"(status={status_priority})"
-                )
-                transcript = self._try_download_and_transcribe_recording(rec_url, display_name)
+                    f"(status={status_priority})")
+                transcript = self._try_download_and_transcribe_recording(
+                    rec_url, display_name)
                 if transcript:
-                    parts.append(f"Meeting Recording Transcript:\n{transcript}")
+                    parts.append(
+                        f"Meeting Recording Transcript:\n{transcript}")
                     msg["has_video"] = True
                     thread["has_video"] = True
                     recording_transcribed = True
@@ -203,19 +233,25 @@ class MessageProcessor:
                 if content_url and self._is_recording_url(content_url):
                     candidate_urls.append(("content_url", content_url))
 
-                if card_content_raw and ("adaptive" in content_type_att or "card" in content_type_att or not content_type_att):
+                if card_content_raw and ("adaptive" in content_type_att
+                                         or "card" in content_type_att
+                                         or not content_type_att):
                     try:
                         card = _json.loads(card_content_raw)
                         for url in self._extract_card_urls(card):
                             if url and self._is_recording_url(url):
                                 candidate_urls.append(("card_action", url))
                     except Exception as _e:
-                        logger.warning(f"[Processor] Could not parse card_content for recording URLs: {_e} | raw={card_content_raw[:100]}")
+                        logger.warning(
+                            f"[Processor] Could not parse card_content for recording URLs: {_e} | raw={card_content_raw[:100]}"
+                        )
 
                 for label, url in candidate_urls:
-                    transcript = self._try_download_and_transcribe_recording(url, f"{att_name or label}")
+                    transcript = self._try_download_and_transcribe_recording(
+                        url, f"{att_name or label}")
                     if transcript:
-                        parts.append(f"Meeting Recording Transcript:\n{transcript}")
+                        parts.append(
+                            f"Meeting Recording Transcript:\n{transcript}")
                         msg["has_video"] = True
                         thread["has_video"] = True
                         recording_transcribed = True
@@ -224,7 +260,9 @@ class MessageProcessor:
                     break
 
         if not recording_transcribed and self.audio_processor and self.teams_client:
-            logger.info("[Processor] No recording card found in any message — will rely on audio/video attachments and event metadata")
+            logger.info(
+                "[Processor] No recording card found in any message — will rely on audio/video attachments and event metadata"
+            )
 
         for msg in messages:
             event_detail = msg.get("event_detail", {})
@@ -240,10 +278,14 @@ class MessageProcessor:
                 except Exception:
                     timestamp = f"[{created_at[:16]}]"
 
-            event_type = event_detail.get("@odata.type", "") if event_detail else ""
-            recording_name = event_detail.get("callRecordingDisplayName", "") if event_detail else ""
-            recording_status = event_detail.get("callRecordingStatus", "") if event_detail else ""
-            initiator_user = ((event_detail or {}).get("initiator") or {}).get("user", {}) or {}
+            event_type = event_detail.get("@odata.type",
+                                          "") if event_detail else ""
+            recording_name = event_detail.get("callRecordingDisplayName",
+                                              "") if event_detail else ""
+            recording_status = event_detail.get("callRecordingStatus",
+                                                "") if event_detail else ""
+            initiator_user = ((event_detail or {}).get("initiator") or {}).get(
+                "user", {}) or {}
             initiator = initiator_user.get("displayName", sender)
             join_url = (event_detail or {}).get("joinWebUrl", "")
 
@@ -275,74 +317,103 @@ class MessageProcessor:
 
             attachments = msg.get("attachments", [])
             for att in attachments:
-                att_name = att.get("name") or att.get("content_type", "attachment")
+                att_name = att.get("name") or att.get("content_type",
+                                                      "attachment")
                 content_url = att.get("content_url") or ""
                 if self.audio_processor and self.teams_client:
-                    def _download_media(att=att, content_url=content_url, msg=msg):
-                        if content_url and not self._is_recording_url(content_url):
-                            return self.teams_client.download_attachment_content(content_url)
+
+                    def _download_media(att=att,
+                                        content_url=content_url,
+                                        msg=msg):
+                        if content_url and not self._is_recording_url(
+                                content_url):
+                            return self.teams_client.download_attachment_content(
+                                content_url)
                         card_content = att.get("card_content") or ""
                         if card_content:
                             try:
                                 import json as _j
                                 card = _j.loads(card_content)
-                                media_url = card.get("media", [{}])[0].get("url", "")
+                                media_url = card.get("media",
+                                                     [{}])[0].get("url", "")
                                 if media_url:
-                                    logger.info("[Processor] Downloading audio card via AMS URL from card_content")
-                                    return self.teams_client.download_attachment_content(media_url)
+                                    logger.info(
+                                        "[Processor] Downloading audio card via AMS URL from card_content"
+                                    )
+                                    return self.teams_client.download_attachment_content(
+                                        media_url)
                             except Exception as _e:
-                                logger.warning(f"[Processor] Failed to parse card_content for media URL: {_e}")
+                                logger.warning(
+                                    f"[Processor] Failed to parse card_content for media URL: {_e}"
+                                )
                         source_base_url = msg.get("source_base_url", "")
                         msg_id = msg.get("id", "")
                         if source_base_url and msg_id:
-                            hosted = self.teams_client.list_message_hosted_contents(source_base_url, msg_id)
-                            logger.info(f"[Processor] Found {len(hosted)} hosted content(s) for message {msg_id}")
+                            hosted = self.teams_client.list_message_hosted_contents(
+                                source_base_url, msg_id)
+                            logger.info(
+                                f"[Processor] Found {len(hosted)} hosted content(s) for message {msg_id}"
+                            )
                             for item in hosted:
                                 blob_id = item.get("id", "")
                                 if blob_id:
-                                    data = self.teams_client.download_hosted_content(source_base_url, msg_id, blob_id)
+                                    data = self.teams_client.download_hosted_content(
+                                        source_base_url, msg_id, blob_id)
                                     if data:
                                         return data
                         return b""
 
                     if self.audio_processor.is_audio_attachment(att):
                         try:
-                            effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.ogg"
-                            logger.info(f"[Processor] Audio attachment: {effective_name}")
+                            effective_name = att_name if att_name and att_name != att.get(
+                                "content_type", "") else "voice_note.ogg"
+                            logger.info(
+                                f"[Processor] Audio attachment: {effective_name}"
+                            )
                             audio_bytes = _download_media()
-                            transcript = self.audio_processor.transcribe_audio(audio_bytes, effective_name)
+                            transcript = self.audio_processor.transcribe_audio(
+                                audio_bytes, effective_name)
                             if transcript:
-                                parts.append(f"Meeting Audio Transcript:\n{transcript}")
+                                parts.append(
+                                    f"Meeting Audio Transcript:\n{transcript}")
                                 msg["has_audio"] = True
                                 thread["has_audio"] = True
                         except Exception as e:
-                            logger.warning(f"[Processor] Meeting audio transcription failed: {e}")
+                            logger.warning(
+                                f"[Processor] Meeting audio transcription failed: {e}"
+                            )
                     elif self.audio_processor.is_video_attachment(att):
                         try:
-                            effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.mp4"
-                            logger.info(f"[Processor] Video attachment: {effective_name}")
+                            effective_name = att_name if att_name and att_name != att.get(
+                                "content_type", "") else "voice_note.mp4"
+                            logger.info(
+                                f"[Processor] Video attachment: {effective_name}"
+                            )
                             video_bytes = _download_media()
-                            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, effective_name)
-                            mp3_name = effective_name.rsplit(".", 1)[0] + ".mp3"
-                            transcript = self.audio_processor.transcribe_audio(mp3_bytes, mp3_name)
+                            mp3_bytes = self.audio_processor.video_to_mp3(
+                                video_bytes, effective_name)
+                            mp3_name = effective_name.rsplit(".",
+                                                             1)[0] + ".mp3"
+                            transcript = self.audio_processor.transcribe_audio(
+                                mp3_bytes, mp3_name)
                             if transcript:
-                                parts.append(f"Meeting Video Transcript:\n{transcript}")
+                                parts.append(
+                                    f"Meeting Video Transcript:\n{transcript}")
                                 msg["has_video"] = True
                                 thread["has_video"] = True
                         except Exception as e:
-                            logger.warning(f"[Processor] Meeting video transcription failed: {e}")
+                            logger.warning(
+                                f"[Processor] Meeting video transcription failed: {e}"
+                            )
 
         has_transcript = any(
             p.startswith("Meeting Recording Transcript:")
             or p.startswith("Meeting Audio Transcript:")
-            or p.startswith("Meeting Video Transcript:")
-            for p in parts
-        )
+            or p.startswith("Meeting Video Transcript:") for p in parts)
         if not has_transcript:
             logger.info(
                 f"[Processor] Meeting thread has no transcript content — skipping "
-                f"(only event metadata: {len(parts)} part(s))"
-            )
+                f"(only event metadata: {len(parts)} part(s))")
             return ""
 
         return "\n".join(parts)
@@ -362,7 +433,8 @@ class MessageProcessor:
             if created_at:
                 try:
                     from datetime import datetime
-                    dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    dt = datetime.fromisoformat(
+                        created_at.replace("Z", "+00:00"))
                     timestamp = dt.strftime("[%Y-%m-%d %H:%M]")
                 except Exception:
                     timestamp = f"[{created_at[:16]}]"
@@ -371,78 +443,120 @@ class MessageProcessor:
                 parts.append(f"{timestamp} {sender}: {content}")
 
             for att in attachments:
-                att_name = att.get("name") or att.get("content_type", "attachment")
+                att_name = att.get("name") or att.get("content_type",
+                                                      "attachment")
                 content_url = att.get("content_url") or ""
 
                 if self.audio_processor and self.teams_client:
-                    def _download_media(att=att, content_url=content_url, msg=msg):
+
+                    def _download_media(att=att,
+                                        content_url=content_url,
+                                        msg=msg):
                         if content_url:
-                            return self.teams_client.download_attachment_content(content_url)
+                            return self.teams_client.download_attachment_content(
+                                content_url)
                         card_content = att.get("card_content") or ""
                         if card_content:
                             try:
                                 import json as _json
                                 card = _json.loads(card_content)
-                                media_url = card.get("media", [{}])[0].get("url", "")
+                                media_url = card.get("media",
+                                                     [{}])[0].get("url", "")
                                 if media_url:
-                                    logger.info("[Processor] Downloading audio card via AMS URL from card_content")
-                                    return self.teams_client.download_attachment_content(media_url)
+                                    logger.info(
+                                        "[Processor] Downloading audio card via AMS URL from card_content"
+                                    )
+                                    return self.teams_client.download_attachment_content(
+                                        media_url)
                             except Exception as _e:
-                                logger.warning(f"[Processor] Failed to parse card_content for media URL: {_e}")
+                                logger.warning(
+                                    f"[Processor] Failed to parse card_content for media URL: {_e}"
+                                )
                         source_base_url = msg.get("source_base_url", "")
                         msg_id = msg.get("id", "")
                         if source_base_url and msg_id:
-                            hosted = self.teams_client.list_message_hosted_contents(source_base_url, msg_id)
-                            logger.info(f"[Processor] Found {len(hosted)} hosted content(s) for message {msg_id}, trying each")
+                            hosted = self.teams_client.list_message_hosted_contents(
+                                source_base_url, msg_id)
+                            logger.info(
+                                f"[Processor] Found {len(hosted)} hosted content(s) for message {msg_id}, trying each"
+                            )
                             for item in hosted:
                                 blob_id = item.get("id", "")
                                 if blob_id:
-                                    data = self.teams_client.download_hosted_content(source_base_url, msg_id, blob_id)
+                                    data = self.teams_client.download_hosted_content(
+                                        source_base_url, msg_id, blob_id)
                                     if data:
                                         return data
                         return b""
 
                     if self.audio_processor.is_audio_attachment(att):
-                        effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.ogg"
-                        logger.info(f"[Processor] Audio card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}")
+                        effective_name = att_name if att_name and att_name != att.get(
+                            "content_type", "") else "voice_note.ogg"
+                        logger.info(
+                            f"[Processor] Audio card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}"
+                        )
                         try:
                             audio_bytes = _download_media()
-                            transcript = self.audio_processor.transcribe_audio(audio_bytes, effective_name)
+                            transcript = self.audio_processor.transcribe_audio(
+                                audio_bytes, effective_name)
                             if transcript:
-                                parts.append(f"{timestamp} {sender} [voice note]: {transcript}")
+                                parts.append(
+                                    f"{timestamp} {sender} [voice note]: {transcript}"
+                                )
                                 msg["has_audio"] = True
                             else:
-                                logger.info(f"[Processor] Audio transcription returned empty for {effective_name}, skipping thread")
-                                raise AudioTranscriptionRequired(effective_name)
+                                logger.info(
+                                    f"[Processor] Audio transcription returned empty for {effective_name}, skipping thread"
+                                )
+                                raise AudioTranscriptionRequired(
+                                    effective_name)
                         except AudioTranscriptionRequired:
                             raise
                         except Exception as e:
-                            logger.warning(f"[Processor] Failed to transcribe audio {effective_name}: {e}")
+                            logger.warning(
+                                f"[Processor] Failed to transcribe audio {effective_name}: {e}"
+                            )
                             raise AudioTranscriptionRequired(effective_name)
                     elif self.audio_processor.is_video_attachment(att):
-                        effective_name = att_name if att_name and att_name != att.get("content_type", "") else "voice_note.mp4"
-                        logger.info(f"[Processor] Video card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}")
+                        effective_name = att_name if att_name and att_name != att.get(
+                            "content_type", "") else "voice_note.mp4"
+                        logger.info(
+                            f"[Processor] Video card attachment: content_type={att.get('content_type')}, has_content_url={bool(content_url)}, has_card_content={bool(att.get('card_content'))}, att_id={att.get('id')}"
+                        )
                         try:
                             video_bytes = _download_media()
-                            mp3_bytes = self.audio_processor.video_to_mp3(video_bytes, effective_name)
-                            mp3_name = effective_name.rsplit(".", 1)[0] + ".mp3"
-                            transcript = self.audio_processor.transcribe_audio(mp3_bytes, mp3_name)
+                            mp3_bytes = self.audio_processor.video_to_mp3(
+                                video_bytes, effective_name)
+                            mp3_name = effective_name.rsplit(".",
+                                                             1)[0] + ".mp3"
+                            transcript = self.audio_processor.transcribe_audio(
+                                mp3_bytes, mp3_name)
                             if transcript:
-                                parts.append(f"{timestamp} {sender} [video audio]: {transcript}")
+                                parts.append(
+                                    f"{timestamp} {sender} [video audio]: {transcript}"
+                                )
                                 msg["has_video"] = True
                             else:
-                                logger.info(f"[Processor] Video transcription returned empty for {effective_name}, skipping thread")
-                                raise AudioTranscriptionRequired(effective_name)
+                                logger.info(
+                                    f"[Processor] Video transcription returned empty for {effective_name}, skipping thread"
+                                )
+                                raise AudioTranscriptionRequired(
+                                    effective_name)
                         except AudioTranscriptionRequired:
                             raise
                         except Exception as e:
-                            logger.warning(f"[Processor] Failed to process video {effective_name}: {e}")
+                            logger.warning(
+                                f"[Processor] Failed to process video {effective_name}: {e}"
+                            )
                             raise AudioTranscriptionRequired(effective_name)
                     else:
-                        parts.append(f"{timestamp} {sender}: [shared a file: {att_name}]")
+                        parts.append(
+                            f"{timestamp} {sender}: [shared a file: {att_name}]"
+                        )
                 else:
                     if not content and att_name:
-                        parts.append(f"{timestamp} {sender}: [attachment: {att_name}]")
+                        parts.append(
+                            f"{timestamp} {sender}: [attachment: {att_name}]")
 
         return "\n".join(parts)
 
@@ -451,17 +565,25 @@ class MessageProcessor:
     def _clarify_chunk(self, text: str) -> str:
         try:
             response = self.openai.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",
                 messages=[
-                    {"role": "system", "content": CLARIFY_SYSTEM_PROMPT},
-                    {"role": "user", "content": text},
+                    {
+                        "role": "system",
+                        "content": CLARIFY_SYSTEM_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": text
+                    },
                 ],
-                temperature=0.2,
-                max_tokens=16384,
+                temperature=0,
+                max_output_tokens=16384,
             )
             clarified = response.choices[0].message.content.strip()
             if any(phrase in clarified.lower() for phrase in _REFUSAL_PHRASES):
-                logger.warning(f"[Processor] OpenAI refused chunk ({len(text)} chars): {clarified[:80]}")
+                logger.warning(
+                    f"[Processor] OpenAI refused chunk ({len(text)} chars): {clarified[:80]}"
+                )
                 return text
             return clarified
         except Exception as e:
@@ -474,7 +596,9 @@ class MessageProcessor:
 
         if len(raw_text) <= self._CLARIFY_CHUNK_SIZE:
             result = self._clarify_chunk(raw_text)
-            logger.info(f"[Processor] Clarified thread: {len(raw_text)} chars -> {len(result)} chars")
+            logger.info(
+                f"[Processor] Clarified thread: {len(raw_text)} chars -> {len(result)} chars"
+            )
             return result
 
         lines = raw_text.split("\n")
@@ -493,11 +617,15 @@ class MessageProcessor:
         if current_lines:
             chunks.append("\n".join(current_lines))
 
-        logger.info(f"[Processor] Long text ({len(raw_text)} chars): splitting into {len(chunks)} chunks")
+        logger.info(
+            f"[Processor] Long text ({len(raw_text)} chars): splitting into {len(chunks)} chunks"
+        )
         translated = []
         for i, chunk in enumerate(chunks, 1):
             result = self._clarify_chunk(chunk)
-            logger.info(f"[Processor] Clarified chunk {i}/{len(chunks)}: {len(chunk)} -> {len(result)} chars")
+            logger.info(
+                f"[Processor] Clarified chunk {i}/{len(chunks)}: {len(chunk)} -> {len(result)} chars"
+            )
             translated.append(result)
 
         return "\n".join(translated)
@@ -514,25 +642,28 @@ class MessageProcessor:
             logger.error(f"[Processor] Embedding failed: {e}")
             return []
 
-    def _generate_thread_plan(self, clarified_content: str, is_meeting: bool = False) -> dict:
+    def _generate_thread_planX(self,
+                               clarified_content: str,
+                               is_meeting: bool = False) -> dict:
         if not clarified_content or len(clarified_content.strip()) < 30:
             return {"summary": "", "task_planning": ""}
         try:
             if is_meeting:
                 system_prompt = MEETING_PLAN_SYSTEM_PROMPT
                 context = clarified_content[:24000]
-                max_tok = 4096
+                max_tok = 7000
                 user_content = (
                     f"Meeting transcript:\n{context}\n\n"
                     "Produce the JSON development brief as instructed. "
                     "Return only valid JSON: {\"summary\": \"...\", \"task_planning\": \"...\"}"
                 )
-                logger.info(f"[Processor] Generating MEETING plan from {len(context)} chars of transcript")
+                logger.info(
+                    f"[Processor] Generating MEETING plan from {len(context)} chars of transcript"
+                )
             else:
                 system_prompt = (
                     "You analyze translated Teams conversation threads and produce a structured summary and task plan. "
-                    "Be concise and accurate. Respond with JSON only."
-                )
+                    "Be concise and accurate. Respond with JSON only.")
                 context = clarified_content[:3000]
                 max_tok = 1000
                 user_content = (
@@ -550,13 +681,19 @@ class MessageProcessor:
                 )
 
             response = self.openai.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-5-mini",
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content
+                    },
                 ],
                 temperature=0,
-                max_tokens=max_tok,
+                max_output_tokens=max_tok,
             )
             raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
@@ -582,8 +719,157 @@ class MessageProcessor:
                 "summary": str(data.get("summary", "")),
                 "task_planning": task_planning_str,
             }
-            logger.info(f"[Processor] Generated thread plan: summary={len(result['summary'])} chars, plan={len(result['task_planning'])} chars")
+            logger.info(
+                f"[Processor] Generated thread plan: summary={len(result['summary'])} chars, plan={len(result['task_planning'])} chars"
+            )
             return result
+        except Exception as e:
+            logger.warning(f"[Processor] _generate_thread_plan failed: {e}")
+            return {"summary": "", "task_planning": ""}
+
+    def _generate_thread_plan(self,
+                              clarified_content: str,
+                              is_meeting: bool = False) -> dict:
+        if not clarified_content or len(clarified_content.strip()) < 30:
+            return {"summary": "", "task_planning": ""}
+
+        try:
+            if is_meeting:
+                system_prompt = """
+    You are a senior product manager and software architect.
+
+    Your job is to analyze meeting transcripts and convert them into a structured development brief.
+
+    Rules:
+    - Extract concrete implementation tasks from the discussion.
+    - Detect product modules, dashboards, or system components mentioned.
+    - Group tasks under those modules automatically.
+    - Do NOT assume module names beforehand.
+    - Use names exactly as mentioned in the transcript.
+    - Merge tasks if the same module appears multiple times.
+    - Avoid hallucinating features not mentioned.
+
+    Output JSON format:
+
+    {
+     "summary": "A concise summary of the meeting (4-6 sentences)",
+     "task_planning": "A structured markdown implementation plan"
+    }
+
+    Markdown format for task_planning:
+
+    # Development Tasks
+
+    ## <Detected Module / Dashboard Name>
+    - Task
+    - Task
+
+    ## <Another Module>
+    - Task
+    - Task
+
+    ## System / Architecture Changes
+    - Task
+
+    ## Decisions
+    - decision
+
+    ## Open Questions
+    - question
+    """
+
+                context = clarified_content[:50000]
+                max_tok = 4096
+
+                user_content = (
+                    f"Meeting transcript:\n{context}\n\n"
+                    "Analyze the transcript and extract implementation tasks.\n\n"
+                    "Instructions:\n"
+                    "- Detect dashboards, modules, or components discussed.\n"
+                    "- Group tasks under those sections.\n"
+                    "- Focus on UI changes, workflow changes, reporting changes, and architecture changes.\n"
+                    "- Avoid generic summaries; extract concrete development tasks.\n\n"
+                    "Return ONLY valid JSON in this format:\n"
+                    "{\"summary\": \"...\", \"task_planning\": \"...\"}")
+
+            else:
+                system_prompt = """
+    You analyze translated Teams conversation threads and produce a structured summary and task plan.
+    Be concise and accurate. Respond with JSON only.
+    """
+
+                context = clarified_content[:3000]
+                max_tok = 1000
+
+                user_content = (
+                    f"Conversation:\n{context}\n\n"
+                    "Produce JSON with two fields:\n"
+                    "1. \"summary\": 2-3 sentences describing what this conversation is about.\n"
+                    "2. \"task_planning\": Markdown plan with sections:\n"
+                    "   ## Action Items\n"
+                    "   - [ ] **Person** — task\n"
+                    "   ## Decisions Made\n"
+                    "   - decision\n"
+                    "   ## Open Questions\n"
+                    "   - question\n\n"
+                    "Return JSON only: {\"summary\": \"...\", \"task_planning\": \"...\"}"
+                )
+
+            response = self.openai.chat.completions.create(
+                model="gpt-5-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": system_prompt
+                    },
+                    {
+                        "role": "user",
+                        "content": user_content
+                    },
+                ],
+                temperature=0,
+                top_p=1,
+                max_output_tokens=max_tok,
+            )
+
+            raw = response.choices[0].message.content.strip()
+
+            # Remove code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+
+            import json as _json
+            data = _json.loads(raw)
+
+            task_planning_raw = data.get("task_planning", "")
+
+            # Convert dict to markdown if needed
+            if isinstance(task_planning_raw, dict):
+                md_parts = []
+                for section, items in task_planning_raw.items():
+                    md_parts.append(f"## {section}")
+                    if isinstance(items, list):
+                        for item in items:
+                            md_parts.append(f"- {item}")
+                    else:
+                        md_parts.append(str(items))
+                task_planning_str = "\n".join(md_parts)
+            else:
+                task_planning_str = str(task_planning_raw)
+
+            result = {
+                "summary": str(data.get("summary", "")),
+                "task_planning": task_planning_str,
+            }
+
+            logger.info(
+                f"[Processor] Generated thread plan: summary={len(result['summary'])} chars, plan={len(result['task_planning'])} chars"
+            )
+
+            return result
+
         except Exception as e:
             logger.warning(f"[Processor] _generate_thread_plan failed: {e}")
             return {"summary": "", "task_planning": ""}
@@ -592,17 +878,25 @@ class MessageProcessor:
         try:
             raw_text = self._collect_thread_content(thread)
         except AudioTranscriptionRequired as e:
-            logger.info(f"[Processor] Dropping thread — audio transcription failed for: {e}")
+            logger.info(
+                f"[Processor] Dropping thread — audio transcription failed for: {e}"
+            )
             return None
 
         if thread.get("is_meeting") and not raw_text.strip():
-            logger.info("[Processor] Dropping meeting thread — no transcript could be extracted")
+            logger.info(
+                "[Processor] Dropping meeting thread — no transcript could be extracted"
+            )
             return None
 
         is_meeting = bool(thread.get("is_meeting"))
         clarified = self.clarify_thread(raw_text[:32000])
         embedding = self.embed_text(clarified) if clarified else []
-        plan = self._generate_thread_plan(clarified, is_meeting=is_meeting) if clarified else {"summary": "", "task_planning": ""}
+        plan = self._generate_thread_plan(
+            clarified, is_meeting=is_meeting) if clarified else {
+                "summary": "",
+                "task_planning": ""
+            }
 
         return {
             **thread,
